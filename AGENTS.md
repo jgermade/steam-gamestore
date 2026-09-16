@@ -42,19 +42,21 @@ gantt
     axisFormat %Y-%m-%d
 
     section Core
-    GOG OAuth2 authentication   :done,    auth,    2026-09-16, 7d
-    Library catalog             :active,  catalog, after auth, 5d
-    Chunk/manifest downloader   :         dl,      after catalog, 14d
+    GOG OAuth2 authentication :done, auth, 2026-09-16, 7d
+    Library catalog :active, catalog, after auth, 5d
+    Chunk and manifest downloader :crit, dl, after catalog, 14d
 
     section Platform Linux
-    Non-Steam appid (CRC32)     :         appid,   after catalog, 3d
-    shortcuts.vdf writer        :         vdf,     after appid, 5d
-    Launch wrapper + Ludusavi   :         wrap,    after vdf, 5d
+    Non-Steam appid (CRC32) :appid, after catalog, 3d
+    shortcuts.vdf writer :vdf, after appid, 5d
+    Launch wrapper and Ludusavi :wrap, after vdf, 5d
 ```
 ````
 
 Use the standard Mermaid task states (`done`, `active`, `crit`, `milestone`, or
-none for pending work) so progress is readable straight from the chart.
+none for pending work) so progress is readable straight from the chart. Do not pad task
+names with spaces to align the columns: whatever precedes the `:` is the label,
+trailing spaces included.
 
 ## Change records
 
