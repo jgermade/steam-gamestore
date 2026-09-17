@@ -1,11 +1,13 @@
 //! Everything that does not depend on the host platform.
 //!
-//! Later phases add authentication, the catalog and the downloader here; for now
-//! this crate owns the shared error type, logging setup, configuration and the
-//! [`Platform`] trait that the `platform-*` crates implement.
+//! It owns the shared error type, logging setup, configuration, the HTTP client
+//! behind a trait, the GOG OAuth2 flow, and the [`Platform`] trait that the
+//! `platform-*` crates implement. The catalog and the downloader land here too.
 
+pub mod auth;
 pub mod config;
 pub mod error;
+pub mod http;
 pub mod logging;
 pub mod platform;
 

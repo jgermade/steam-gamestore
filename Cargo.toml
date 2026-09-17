@@ -16,9 +16,12 @@ gamestore-platform-windows = { path = "platform-windows" }
 
 clap = { version = "4", features = ["derive"] }
 directories = "6"
+percent-encoding = "2"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tempfile = "3"
 thiserror = "2"
 toml = "1"
 tracing = "0.1"
+ureq = "3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -28,6 +28,18 @@ pub enum Error {
     #[error("could not serialize the configuration: {0}")]
     ConfigSerialize(#[from] toml::ser::Error),
 
+    #[error(
+        "no GOG client credentials configured; put them under [auth] in {path} \
+or set GOG_CLIENT_ID and GOG_CLIENT_SECRET"
+    )]
+    MissingCredentials { path: PathBuf },
+
+    #[error("request to {url} failed: {reason}")]
+    Http { url: String, reason: String },
+
+    #[error("GOG login failed: {0}")]
+    Auth(String),
+
     #[error("no Steam installation found; set STEAM_ROOT to point at one")]
     SteamNotFound,
 

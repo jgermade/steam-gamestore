@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
+use crate::auth::{CLIENT_ID_ENV, CLIENT_SECRET_ENV, Credentials};
 use crate::{APP_NAME, Error, Result};
 
 /// Environment variable overriding the configuration directory.
@@ -93,8 +94,35 @@ impl Paths {
 pub struct Config {
     /// Install games here instead of under the data directory.
     pub install_root: Option<PathBuf>,
+    pub auth: Auth,
     pub download: Download,
     pub ludusavi: Ludusavi,
+}
+
+/// GOG OAuth2 client credentials. Which ones to ship is still open
+/// (`ROADMAP/2026-09-16/08-open-questions.md`, question 3), so there is no
+/// built-in default: the user supplies them here or in the environment.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Auth {
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    /// Only for a client registered with a different redirect than Galaxy's.
+    pub redirect_uri: Option<String>,
+}
+
+/// Never print the secret, not even through `{:?}`.
+impl std::fmt::Debug for Auth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Auth")
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .field("redirect_uri", &self.redirect_uri)
+            .finish()
+    }
 }
 
 /// Download behaviour. Defaults are deliberately polite: GOG rate-limits.
@@ -161,6 +189,37 @@ impl Config {
         Ok(toml::to_string_pretty(self)?)
     }
 
+    /// The OAuth2 credentials to log in with. The environment wins over the file,
+    /// so a shared machine can keep them out of a config the kids can read.
+    pub fn credentials<F>(&self, paths: &Paths, lookup: F) -> Result<Credentials>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        let client_id = lookup(CLIENT_ID_ENV).or_else(|| self.auth.client_id.clone());
+        let client_secret = lookup(CLIENT_SECRET_ENV).or_else(|| self.auth.client_secret.clone());
+
+        let (Some(client_id), Some(client_secret)) = (client_id, client_secret) else {
+            return Err(Error::MissingCredentials {
+                path: paths.config_file(),
+            });
+        };
+
+        let credentials = Credentials::new(client_id, client_secret);
+        Ok(match &self.auth.redirect_uri {
+            Some(redirect_uri) => credentials.with_redirect_uri(redirect_uri),
+            None => credentials,
+        })
+    }
+
+    /// Render the configuration as TOML with the client secret masked, for printing.
+    pub fn to_toml_redacted(&self) -> Result<String> {
+        let mut config = self.clone();
+        if config.auth.client_secret.is_some() {
+            config.auth.client_secret = Some("<redacted>".to_string());
+        }
+        config.to_toml()
+    }
+
     /// Where games are installed, honouring `install_root`.
     pub fn install_root(&self, paths: &Paths) -> PathBuf {
         self.install_root
@@ -207,6 +266,11 @@ mod tests {
         let paths = Paths::resolve_with(overrides(temp.path())).unwrap();
         let config = Config {
             install_root: Some(PathBuf::from("/games")),
+            auth: Auth {
+                client_id: Some("an-id".to_string()),
+                client_secret: Some("a-secret".to_string()),
+                redirect_uri: None,
+            },
             download: Download { concurrency: 8 },
             ludusavi: Ludusavi {
                 binary: PathBuf::from("/usr/bin/ludusavi"),
@@ -226,6 +290,58 @@ mod tests {
 
         assert_eq!(config.download.concurrency, 2);
         assert_eq!(config.ludusavi, Ludusavi::default());
+    }
+
+    #[test]
+    fn the_environment_wins_over_the_configured_credentials() {
+        let paths = Paths::resolve_with(overrides(Path::new("/somewhere"))).unwrap();
+        let config = Config {
+            auth: Auth {
+                client_id: Some("from-file".to_string()),
+                client_secret: Some("file-secret".to_string()),
+                redirect_uri: None,
+            },
+            ..Config::default()
+        };
+
+        let credentials = config
+            .credentials(&paths, |key| {
+                (key == CLIENT_ID_ENV).then(|| "from-env".to_string())
+            })
+            .unwrap();
+
+        assert_eq!(credentials.client_id, "from-env");
+        assert_eq!(credentials.client_secret, "file-secret");
+    }
+
+    #[test]
+    fn missing_credentials_point_at_the_config_file() {
+        let paths = Paths::resolve_with(overrides(Path::new("/somewhere"))).unwrap();
+
+        let error = Config::default().credentials(&paths, |_| None).unwrap_err();
+
+        assert!(matches!(error, Error::MissingCredentials { .. }), "{error}");
+        assert!(error.to_string().contains("config.toml"), "{error}");
+        assert!(error.to_string().contains(CLIENT_ID_ENV), "{error}");
+    }
+
+    #[test]
+    fn printing_the_config_masks_the_secret() {
+        let config = Config {
+            auth: Auth {
+                client_id: Some("an-id".to_string()),
+                client_secret: Some("a-secret".to_string()),
+                redirect_uri: None,
+            },
+            ..Config::default()
+        };
+
+        let printed = config.to_toml_redacted().unwrap();
+
+        assert!(!printed.contains("a-secret"), "{printed}");
+        assert!(printed.contains("<redacted>"), "{printed}");
+        assert!(!format!("{config:?}").contains("a-secret"));
+        assert!(config.to_toml().unwrap().contains("a-secret"));
     }
 
     #[test]

@@ -5,7 +5,11 @@
 
 use std::process::ExitCode;
 
+use std::io::{BufRead, Write};
+
 use clap::{Parser, Subcommand};
+use gamestore_core::auth;
+use gamestore_core::http::UreqClient;
 use gamestore_core::{APP_NAME, Config, Paths, Platform, Result, logging};
 use tracing::error;
 
@@ -24,6 +28,8 @@ enum Command {
     Info,
     /// Show the effective configuration and where it comes from.
     Config,
+    /// Log in to GOG: open the printed URL, then paste where you land.
+    Login,
 }
 
 fn main() -> ExitCode {
@@ -57,6 +63,41 @@ fn run(cli: Cli) -> Result<()> {
                 Err(error) => println!("steam root:   unavailable ({error})"),
             }
         }
+        Command::Login => {
+            let credentials = config.credentials(&paths, |key| std::env::var(key).ok())?;
+
+            println!("Open this address and log in to GOG:");
+            println!();
+            println!("  {}", credentials.authorization_url());
+            println!();
+            println!("GOG then lands on a page whose address carries `code=...`.");
+            print!("Paste that address (or just the code) here: ");
+            std::io::stdout()
+                .flush()
+                .map_err(|error| gamestore_core::Error::io("writing to the terminal", error))?;
+
+            let mut pasted = String::new();
+            std::io::stdin()
+                .lock()
+                .read_line(&mut pasted)
+                .map_err(|error| gamestore_core::Error::io("reading from the terminal", error))?;
+
+            let code = auth::extract_code(&pasted)?;
+            let tokens = auth::exchange_code(&UreqClient::new(), &credentials, &code)?;
+
+            println!("Logged in as GOG user {}.", tokens.user_id);
+            match tokens
+                .expires_at
+                .duration_since(std::time::SystemTime::now())
+            {
+                Ok(left) => println!(
+                    "The access token is valid for {} minutes.",
+                    left.as_secs() / 60
+                ),
+                Err(_) => println!("The access token is already expired."),
+            }
+            println!("Nothing is stored yet: keeping tokens in the keyring is the `tok` task.");
+        }
         Command::Config => {
             let path = paths.config_file();
             let origin = if path.exists() {
@@ -65,7 +106,7 @@ fn run(cli: Cli) -> Result<()> {
                 format!("{} (not created yet, showing defaults)", path.display())
             };
             println!("# {origin}");
-            print!("{}", config.to_toml()?);
+            print!("{}", config.to_toml_redacted()?);
         }
     }
 
