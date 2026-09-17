@@ -14,6 +14,7 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use crate::atomic::Access;
 use crate::auth::{self, Credentials, TokenSet};
 use crate::http::HttpClient;
 use crate::{Error, Paths, Result};
@@ -223,7 +224,7 @@ impl TokenStore for FileStore {
             Error::TokenStore(format!("the session could not be written ({error})"))
         })?;
 
-        write_private(&self.path, &serialized)
+        crate::atomic::write(&self.path, serialized.as_bytes(), Access::Private)
     }
 
     fn clear(&self) -> Result<()> {
@@ -240,78 +241,6 @@ impl TokenStore for FileStore {
     fn describe(&self) -> String {
         format!("file ({}, {PERMISSIONS_NOTE})", self.path.display())
     }
-}
-
-/// Write `contents` so that only this user can read it, and so that a machine
-/// switched off at the wall never leaves a half-written session behind: the bytes
-/// land in a temporary file that is renamed over the target.
-fn write_private(path: &Path, contents: &str) -> Result<()> {
-    use std::io::Write;
-
-    let parent = path
-        .parent()
-        .ok_or_else(|| Error::TokenStore(format!("{} has no parent directory", path.display())))?;
-    create_dir_private(parent)?;
-
-    let temporary = path.with_extension("json.tmp");
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-
-    let mut file = options
-        .open(&temporary)
-        .map_err(|error| Error::io(format!("creating {}", temporary.display()), error))?;
-
-    // `mode` above only applies when the file is created, so a temporary left by a
-    // previous crash would keep whatever permissions it had. Set them either way.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))
-            .map_err(|error| {
-                Error::io(
-                    format!("setting permissions on {}", temporary.display()),
-                    error,
-                )
-            })?;
-    }
-
-    let written = file
-        .write_all(contents.as_bytes())
-        .and_then(|()| file.sync_all());
-    if let Err(error) = written {
-        let _ = std::fs::remove_file(&temporary);
-        return Err(Error::io(format!("writing {}", temporary.display()), error));
-    }
-    drop(file);
-
-    std::fs::rename(&temporary, path).map_err(|error| {
-        let _ = std::fs::remove_file(&temporary);
-        Error::io(
-            format!("replacing {} with {}", path.display(), temporary.display()),
-            error,
-        )
-    })
-}
-
-/// Create a directory only this user can enter.
-fn create_dir_private(dir: &Path) -> Result<()> {
-    std::fs::create_dir_all(dir)
-        .map_err(|error| Error::io(format!("creating {}", dir.display()), error))?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).map_err(|error| {
-            Error::io(format!("setting permissions on {}", dir.display()), error)
-        })?;
-    }
-
-    Ok(())
 }
 
 /// A chosen token store, and why it is the one that was chosen.
@@ -805,8 +734,11 @@ mod tests {
         store.save(&tokens_expiring_at(3600, "refresh-1")).unwrap();
 
         // What a crash between the write and the rename leaves behind, with the
-        // permissions an unlucky umask would have given it.
-        let leftover = store.path().with_extension("json.tmp");
+        // permissions an unlucky umask would have given it. The name is the one
+        // `core::atomic` uses, since that is what does the writing now.
+        let mut leftover_name = store.path().file_name().unwrap().to_os_string();
+        leftover_name.push(".gamestore-tmp");
+        let leftover = store.path().with_file_name(leftover_name);
         std::fs::write(&leftover, "stale").unwrap();
         std::fs::set_permissions(&leftover, std::fs::Permissions::from_mode(0o644)).unwrap();
 
