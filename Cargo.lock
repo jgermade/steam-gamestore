@@ -608,7 +608,7 @@ dependencies = [
 
 [[package]]
 name = "gamestore-cli"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "clap",
  "gamestore-core",
@@ -619,7 +619,7 @@ dependencies = [
 
 [[package]]
 name = "gamestore-core"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "directories",
  "keyring",
@@ -636,7 +636,7 @@ dependencies = [
 
 [[package]]
 name = "gamestore-platform-linux"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "directories",
  "gamestore-core",
@@ -645,7 +645,7 @@ dependencies = [
 
 [[package]]
 name = "gamestore-platform-windows"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "gamestore-core",
  "tempfile",
