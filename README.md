@@ -10,12 +10,24 @@ Plan: [`ROADMAP/2026-09-17/00-overview.md`](ROADMAP/2026-09-17/00-overview.md).
 
 ## Status
 
-Phase 0 of the roadmap is done: the workspace compiles for Linux and Windows and
-the CLI reports what it resolved on the machine. The GOG OAuth2 flow (`auth`) is
-implemented and the session now survives between runs (`tok`), so `gamestore
-login` is followed by `gamestore logout` and an `info` that says who is logged in.
-Both still wait on a run against GOG itself from the mini PC. Catalog, downloads
-and the controller UI are not started.
+Phase 0 is done, and six tasks are written on top of it:
+
+| Task | What it does | State |
+|------|--------------|-------|
+| `auth` | GOG OAuth2 login | written, **unverified against GOG** |
+| `tok` | Session storage and refresh | done |
+| `cat` | Library catalog and cache | written, **unverified against GOG** |
+| `state` | Installed games registry | done |
+| `appid` | Steam's non-Steam appid | written, **unverified against Steam** |
+| `vdf` | `shortcuts.vdf` reader and writer | written, **unverified against Steam** |
+
+"Unverified" is meant literally: this has all been built in an environment that can
+reach neither GOG nor Steam, so those four are complete and unit-tested against
+fixtures nobody has compared to the real thing. What it would take to close them is
+[`RECORD/2026-09-17.mini-pc-verification-plan.WIP.md`](RECORD/2026-09-17.mini-pc-verification-plan.WIP.md).
+
+Downloads (`man`, `dl`, `ver`), the install path (`inno`, `wrap`, `uninst`) and the
+controller UI are not started.
 
 ## Build and run
 
@@ -25,6 +37,8 @@ cargo run -p gamestore-cli -- info
 cargo run -p gamestore-cli -- config
 cargo run -p gamestore-cli -- login
 cargo run -p gamestore-cli -- logout
+cargo run -p gamestore-cli -- library
+cargo run -p gamestore-cli -- appid --exe /games/Bastion/Bastion.exe --name Bastion
 ```
 
 Checks, the same three CI runs:
