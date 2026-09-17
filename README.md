@@ -29,6 +29,43 @@ fixtures nobody has compared to the real thing. What it would take to close them
 Downloads (`man`, `dl`, `ver`), the install path (`inno`, `wrap`, `uninst`) and the
 controller UI are not started.
 
+What *can* be tried now: [one line](#install) puts the binary on the machine, and
+[`gamestore steam-install`](#trying-it-from-steam) puts gamestore itself in the
+Steam library as a tile — which is how `appid` and `vdf` get their first look at a
+real Steam. `login` needs GOG client credentials, which is still question 3.
+
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/jgermade/steam-gamestore/main/install.sh | sh
+```
+
+That puts the binary in `~/.local/bin/gamestore`. Nothing outside that prefix is
+touched, so it needs no root and works unchanged on an immutable SteamOS.
+
+It takes the released binary when there is one for this machine, and builds from
+source when there is not — which is what happens until the first release is cut, and
+what happens on any system the published binary will not start on. The build needs
+`cargo`, and the script says how to get one when there is none (`pacman -S rustup` on
+Arch and CachyOS).
+
+Options go after `--`, and the script is worth reading before it is run:
+
+```sh
+curl -fsSL .../install.sh | sh -s -- --prefix /opt/gamestore
+curl -fsSL .../install.sh | sh -s -- --from-source
+curl -fsSL .../install.sh | sh -s -- --version v0.1.0
+```
+
+From a checkout it always builds what is in front of it:
+
+```sh
+./install.sh            # or --debug, for a faster edit-run loop
+```
+
+Released archives are published with a `SHA256SUMS` file, and the installer refuses
+an archive that does not match it.
+
 ## Build and run
 
 ```sh
@@ -39,6 +76,8 @@ cargo run -p gamestore-cli -- login
 cargo run -p gamestore-cli -- logout
 cargo run -p gamestore-cli -- library
 cargo run -p gamestore-cli -- appid --exe /games/Bastion/Bastion.exe --name Bastion
+cargo run -p gamestore-cli -- steam-install
+cargo run -p gamestore-cli -- steam-uninstall
 ```
 
 Checks, the same three CI runs:
@@ -74,6 +113,46 @@ export GOG_CLIENT_ID=… GOG_CLIENT_SECRET=…
 
 Whether releases should ship the well-known GOG Galaxy credentials instead is
 still open (question 3 in the roadmap).
+
+## Trying it from Steam
+
+```sh
+gamestore steam-install
+```
+
+This adds **gamestore itself** to Steam as a non-Steam tile. It is a test harness,
+not the product — the controller UI is its own phase — but installing gamestore as
+a game is the cheapest way to answer the two questions no test in this repository
+can: whether Steam derives the same appid this code does, and whether it accepts a
+`shortcuts.vdf` written here.
+
+Restart Steam afterwards; the tile will not appear until you do. Then:
+
+- Launch it once and check that the `compatdata` directory Steam creates is the
+  number `steam-install` printed. **A different number means the appid derivation
+  is wrong**, and `vdf`, `compat`, `wrap` and `uninst` all inherit it.
+- Close Steam, open it again, and check the tile is still there. That is what proves
+  the write survived the client rewriting the file on exit.
+
+Steam owns `shortcuts.vdf` while it runs: it reads the file at startup and writes it
+back when it quits, so a tile added underneath a running client is discarded the
+moment that client exits. `steam-install` says so when it finds Steam running, but
+the safe order is to close Steam first.
+
+The tile runs `gamestore login` by default; `--command library` registers a second
+one for something else. Because a tile starts with no terminal attached, the
+shortcut points at a small generated launcher that opens one, runs gamestore inside
+it, and waits for a keypress so the output can be read from the sofa.
+`--no-terminal` points the tile straight at the binary instead.
+
+On a machine with more than one Steam account the command refuses to guess and lists
+them: pass `--user <id>` or `--all-users`. Whether a game installed by one user
+should appear for all of them is question 5 in the roadmap, and a default here would
+answer it by accident.
+
+The file as it was first found is kept next to it as
+`shortcuts.vdf.gamestore-backup`, taken once and never overwritten.
+`gamestore steam-uninstall` removes the tile again.
 
 ## Where the session is kept
 
@@ -119,6 +198,29 @@ them. `STEAM_ROOT` points at a Steam installation the platform crates cannot
 guess, `GOG_CLIENT_ID` and `GOG_CLIENT_SECRET` carry the OAuth2 credentials, and
 `GAMESTORE_ACCOUNT` names the stored GOG session, and `GAMESTORE_LOG` sets the log
 filter (for example `GAMESTORE_LOG=debug`).
+
+## Releases
+
+Two workflows, and neither is run by pushing a tag by hand:
+
+- [`build.yml`](.github/workflows/build.yml) runs on every push to every branch:
+  `cargo fmt --check`, `clippy -D warnings`, `cargo test` and `cargo build`, on Linux
+  and on Windows. It is also callable, which is how the release uses it.
+- [`release.yml`](.github/workflows/release.yml) is run by hand from the Actions tab,
+  with one input: whether to raise the `patch`, `minor` or `major` version.
+
+A release run raises the version in the workspace `Cargo.toml`, refreshes
+`Cargo.lock`, commits, tags it `vX.Y.Z`, then calls `build.yml` **against that tag**
+and publishes what comes out. So the binaries attached to a release are built from
+exactly the commit the release names, and a failing check leaves the tag in place
+and publishes nothing — a tag can be deleted, a published release cannot be taken
+back. Tick `draft` to look it over before it goes out.
+
+Attached to each release: `gamestore-x86_64-unknown-linux-gnu.tar.gz`,
+`gamestore-x86_64-pc-windows-msvc.zip`, and `SHA256SUMS`. The Linux binary is
+linked against glibc, so a distribution older than the runner's will refuse it;
+`install.sh` checks that it starts and falls back to building from source when it
+does not.
 
 ## Contributing
 

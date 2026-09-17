@@ -2,6 +2,7 @@
 //! and later the `CompatToolMapping` writer and the generated launch wrappers.
 
 pub mod shortcuts;
+pub mod tile;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};

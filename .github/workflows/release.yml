@@ -1,0 +1,120 @@
+name: Release
+
+# Run by hand from the Actions tab. It raises the version, tags it, runs the full
+# `build.yml` against that tag, and publishes what came out of it.
+#
+# The order matters: the tag is created first and the build is pointed at it, so
+# the binaries attached to a release are built from exactly the commit the release
+# names — not from whatever `main` happened to be when the run started.
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Which part of the version to raise
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+        required: true
+      draft:
+        description: Publish as a draft, to look it over before it goes out
+        type: boolean
+        default: false
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+      tag: ${{ steps.bump.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Raise the version
+        id: bump
+        run: |
+          set -eu
+          version="$(python3 .github/bump-version.py '${{ inputs.bump }}')"
+          # Every crate inherits the workspace version, so the lock file names it
+          # too; leaving it stale would break `--locked` in the build below.
+          cargo update --workspace
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and tag
+        run: |
+          set -eu
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          git commit -m "Release ${{ steps.bump.outputs.tag }}"
+          git tag -a "${{ steps.bump.outputs.tag }}" -m "gamestore ${{ steps.bump.outputs.version }}"
+          git push origin "HEAD:${{ github.ref_name }}"
+          git push origin "${{ steps.bump.outputs.tag }}"
+
+  build:
+    name: build
+    needs: version
+    # The full set of checks, against the tag that was just created. A red build
+    # here leaves the tag in place and publishes nothing, which is the right way
+    # round: the tag can be deleted, a bad release cannot be unpublished.
+    uses: ./.github/workflows/build.yml
+    with:
+      ref: ${{ needs.version.outputs.tag }}
+      package: true
+
+  publish:
+    name: publish
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.version.outputs.tag }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Assemble the archives
+        run: |
+          set -eu
+          mkdir -p dist
+
+          linux="artifacts/gamestore-x86_64-unknown-linux-gnu/gamestore"
+          chmod +x "$linux"
+          tar -czf "dist/gamestore-x86_64-unknown-linux-gnu.tar.gz" -C "$(dirname "$linux")" gamestore
+
+          windows="artifacts/gamestore-x86_64-pc-windows-msvc/gamestore.exe"
+          # -j so the archive holds gamestore.exe, not the artifact directory.
+          zip -qj "dist/gamestore-x86_64-pc-windows-msvc.zip" "$windows"
+
+          # install.sh fetches this and refuses an archive that does not match.
+          ( cd dist && sha256sum ./*.tar.gz ./*.zip | sed 's| \./| |' > SHA256SUMS )
+          cat dist/SHA256SUMS
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          gh release create "${{ needs.version.outputs.tag }}" \
+            --title "gamestore ${{ needs.version.outputs.version }}" \
+            --generate-notes \
+            ${{ inputs.draft && '--draft' || '' }} \
+            dist/gamestore-x86_64-unknown-linux-gnu.tar.gz \
+            dist/gamestore-x86_64-pc-windows-msvc.zip \
+            dist/SHA256SUMS
