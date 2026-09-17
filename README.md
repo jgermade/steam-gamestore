@@ -6,14 +6,14 @@ from Big Picture through the Proton that Steam already manages — with saves
 restored before play and backed up afterwards by Ludusavi.
 
 Design notes: [`docs/gog-installer.md`](docs/gog-installer.md).
-Plan: [`ROADMAP/2026-09-16/00-overview.md`](ROADMAP/2026-09-16/00-overview.md).
+Plan: [`ROADMAP/2026-09-17/00-overview.md`](ROADMAP/2026-09-17/00-overview.md).
 
 ## Status
 
 Phase 0 of the roadmap is done: the workspace compiles for Linux and Windows and
 the CLI reports what it resolved on the machine. The GOG OAuth2 flow (`auth`) is
 in progress — `gamestore login` obtains tokens but does not store them yet, which
-is the `tok` task. Catalog and downloads are not started.
+is the `tok` task. Catalog, downloads and the controller UI are not started.
 
 ## Build and run
 
