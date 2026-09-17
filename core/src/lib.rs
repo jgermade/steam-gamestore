@@ -10,6 +10,7 @@ pub mod error;
 pub mod http;
 pub mod logging;
 pub mod platform;
+pub mod steam;
 pub mod tokens;
 
 pub use config::{Config, Paths};

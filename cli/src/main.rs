@@ -32,6 +32,15 @@ enum Command {
     Login,
     /// Forget the stored GOG session.
     Logout,
+    /// Derive the Steam appid for a non-Steam shortcut, to compare against Steam.
+    Appid {
+        /// The executable path, unquoted; it is quoted the way Steam stores it.
+        #[arg(long)]
+        exe: String,
+        /// The shortcut's display name, exactly as Steam shows it.
+        #[arg(long)]
+        name: String,
+    },
 }
 
 /// The session, and why its tokens are kept where they are.
@@ -153,6 +162,33 @@ fn run(cli: Cli) -> Result<()> {
             let mut stored = open(&config, &paths)?;
             stored.session.log_out()?;
             println!("The stored session was forgotten.");
+        }
+        Command::Appid { exe, name } => {
+            // The point of this command is the mini PC: `03-platform-linux.md`
+            // calls an appid mismatch the risk to test end to end early, and the
+            // way to test it is to compare these numbers against a shortcut Steam
+            // made itself.
+            let stored_exe = gamestore_core::steam::quote_exe(&exe);
+            let appid = gamestore_core::steam::shortcut_appid(&stored_exe, &name);
+
+            println!("exe as stored: {stored_exe}");
+            println!("name:          {name}");
+            println!("appid:         {appid}");
+            println!(
+                "shortcut id:   {}",
+                gamestore_core::steam::shortcut_id(&stored_exe, &name)
+            );
+            println!(
+                "compatdata:    steamapps/compatdata/{}",
+                gamestore_core::steam::compatdata_name(appid)
+            );
+            // Which appid variant the artwork files use is still unverified —
+            // `RECORD/2026-09-17.pending-roadmap-changes.WIP.md` lists it as one of
+            // the things the mini PC run has to settle — so it is offered as the
+            // thing to check, not stated as the answer.
+            println!(
+                "artwork:       expected under userdata/<user>/config/grid/ keyed on {appid} (unverified)"
+            );
         }
         Command::Config => {
             let path = paths.config_file();
