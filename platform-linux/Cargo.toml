@@ -1,0 +1,15 @@
+[package]
+name = "gamestore-platform-linux"
+description = "Steam and Proton integration for Linux: shortcuts, compat tool mapping, launch wrappers."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+directories.workspace = true
+gamestore-core.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

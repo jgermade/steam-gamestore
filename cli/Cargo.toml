@@ -1,0 +1,23 @@
+[package]
+name = "gamestore-cli"
+description = "Command line entry point: wires the platform crate for the target it is built for."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "gamestore"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+gamestore-core.workspace = true
+tracing.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gamestore-platform-linux.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+gamestore-platform-windows.workspace = true

@@ -1,0 +1,28 @@
+[workspace]
+members = ["core", "platform-linux", "platform-windows", "cli"]
+resolver = "3"
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/jgermade/steam-gamestore"
+
+[workspace.dependencies]
+gamestore-core = { path = "core" }
+gamestore-platform-linux = { path = "platform-linux" }
+gamestore-platform-windows = { path = "platform-windows" }
+
+clap = { version = "4", features = ["derive"] }
+directories = "6"
+keyring = "4"
+percent-encoding = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+thiserror = "2"
+toml = "1"
+tracing = "0.1"
+ureq = "3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
