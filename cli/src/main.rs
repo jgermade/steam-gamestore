@@ -4,6 +4,7 @@
 //! Windows one and the other way round.
 
 use std::process::ExitCode;
+use std::time::SystemTime;
 
 use std::io::{BufRead, Write};
 
@@ -32,6 +33,15 @@ enum Command {
     Login,
     /// Forget the stored GOG session.
     Logout,
+    /// List the GOG library, from the local cache unless asked to refresh.
+    Library {
+        /// Fetch from GOG instead of reading the cache.
+        #[arg(long)]
+        refresh: bool,
+        /// Only show games whose title contains this.
+        #[arg(long)]
+        search: Option<String>,
+    },
     /// Derive the Steam appid for a non-Steam shortcut, to compare against Steam.
     Appid {
         /// The executable path, unquoted; it is quoted the way Steam stores it.
@@ -162,6 +172,45 @@ fn run(cli: Cli) -> Result<()> {
             let mut stored = open(&config, &paths)?;
             stored.session.log_out()?;
             println!("The stored session was forgotten.");
+        }
+        Command::Library { refresh, search } => {
+            let mut stored = open(&config, &paths)?;
+            stored.session.restore()?;
+
+            let catalog = if refresh {
+                let token = stored.session.access_token()?;
+                let fetched =
+                    gamestore_core::catalog::fetch(&UreqClient::new(), &token, SystemTime::now())?;
+                fetched.save(&paths)?;
+                fetched
+            } else {
+                match gamestore_core::catalog::Catalog::load(&paths)? {
+                    Some(cached) => cached,
+                    None => {
+                        let token = stored.session.access_token()?;
+                        gamestore_core::catalog::load_or_fetch(
+                            &paths,
+                            &UreqClient::new(),
+                            &token,
+                            SystemTime::now(),
+                        )?
+                    }
+                }
+            };
+
+            let games = catalog.search(search.as_deref().unwrap_or_default());
+            for game in &games {
+                // The Windows marker is the one that matters: it is the build that
+                // gets installed under Proton.
+                let windows = if game.has_windows_build() {
+                    "win"
+                } else {
+                    "   "
+                };
+                println!("{:<12} {windows}  {}", game.id, game.title);
+            }
+            println!();
+            println!("{} of {} games.", games.len(), catalog.len());
         }
         Command::Appid { exe, name } => {
             // The point of this command is the mini PC: `03-platform-linux.md`

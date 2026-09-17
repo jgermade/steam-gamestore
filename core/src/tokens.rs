@@ -431,7 +431,7 @@ mod tests {
     }
 
     impl HttpClient for ScriptedHttp {
-        fn get(&self, url: &str) -> Result<Response> {
+        fn get_authorized(&self, url: &str, _bearer: Option<&str>) -> Result<Response> {
             self.calls.borrow_mut().push(url.to_string());
             self.responses
                 .borrow_mut()

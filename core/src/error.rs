@@ -46,6 +46,9 @@ or set GOG_CLIENT_ID and GOG_CLIENT_SECRET"
     #[error("{0}")]
     Vdf(String),
 
+    #[error("the GOG library could not be read: {0}")]
+    Catalog(String),
+
     #[error("not logged in to GOG; run `gamestore login`")]
     NotLoggedIn,
 

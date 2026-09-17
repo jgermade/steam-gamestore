@@ -6,6 +6,7 @@
 
 pub mod atomic;
 pub mod auth;
+pub mod catalog;
 pub mod config;
 pub mod error;
 pub mod http;

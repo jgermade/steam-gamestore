@@ -325,7 +325,7 @@ mod tests {
     }
 
     impl HttpClient for FakeHttp {
-        fn get(&self, url: &str) -> Result<Response> {
+        fn get_authorized(&self, url: &str, _bearer: Option<&str>) -> Result<Response> {
             self.seen.borrow_mut().push(url.to_string());
             Ok(self.response.clone())
         }
