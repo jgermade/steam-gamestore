@@ -12,6 +12,7 @@ pub mod error;
 pub mod http;
 pub mod logging;
 pub mod platform;
+pub mod registry;
 pub mod shortcuts;
 pub mod steam;
 pub mod tokens;

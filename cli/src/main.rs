@@ -10,6 +10,7 @@ use std::io::{BufRead, Write};
 
 use clap::{Parser, Subcommand};
 use gamestore_core::http::UreqClient;
+use gamestore_core::registry::{Registry, State};
 use gamestore_core::tokens::{self, Session, TokenStore};
 use gamestore_core::{APP_NAME, Config, Paths, Platform, Result, logging};
 use tracing::error;
@@ -198,6 +199,14 @@ fn run(cli: Cli) -> Result<()> {
                 }
             };
 
+            // Anything left mid-install by a machine switched off at the wall is
+            // cleared here, before it is drawn as a permanently busy row.
+            let mut registry = Registry::load(&paths)?;
+            let reset = registry.reconcile(SystemTime::now());
+            if !reset.is_empty() {
+                registry.save(&paths)?;
+            }
+
             let games = catalog.search(search.as_deref().unwrap_or_default());
             for game in &games {
                 // The Windows marker is the one that matters: it is the build that
@@ -207,10 +216,23 @@ fn run(cli: Cli) -> Result<()> {
                 } else {
                     "   "
                 };
-                println!("{:<12} {windows}  {}", game.id, game.title);
+                let state = match registry.state_of(&game.id) {
+                    State::NotInstalled => "-",
+                    State::Queued => "queued",
+                    State::Downloading => "downloading",
+                    State::Installing => "installing",
+                    State::Installed => "installed",
+                    State::UpdateAvailable => "update",
+                    State::Failed => "failed",
+                };
+                println!("{:<12} {windows}  {state:<12} {}", game.id, game.title);
             }
             println!();
             println!("{} of {} games.", games.len(), catalog.len());
+            for id in &reset {
+                let title = catalog.get(id).map_or("?", |game| game.title.as_str());
+                println!("{title} was interrupted before it finished; start it again.");
+            }
         }
         Command::Appid { exe, name } => {
             // The point of this command is the mini PC: `03-platform-linux.md`

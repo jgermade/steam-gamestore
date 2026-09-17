@@ -49,6 +49,9 @@ or set GOG_CLIENT_ID and GOG_CLIENT_SECRET"
     #[error("the GOG library could not be read: {0}")]
     Catalog(String),
 
+    #[error("{0}")]
+    Registry(String),
+
     #[error("not logged in to GOG; run `gamestore login`")]
     NotLoggedIn,
 
