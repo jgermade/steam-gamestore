@@ -58,6 +58,9 @@ or set GOG_CLIENT_ID and GOG_CLIENT_SECRET"
     #[error("no Steam installation found; set STEAM_ROOT to point at one")]
     SteamNotFound,
 
+    #[error("{0}")]
+    Steam(String),
+
     #[error("{0} is not supported on this platform")]
     Unsupported(&'static str),
 }

@@ -16,6 +16,8 @@ use gamestore_core::{APP_NAME, Config, Paths, Platform, Result, logging};
 use tracing::error;
 
 mod platform;
+#[cfg(target_os = "linux")]
+mod steam;
 
 #[derive(Debug, Parser)]
 #[command(name = APP_NAME, version, about = "Install and launch GOG games from the Steam library")]
@@ -42,6 +44,41 @@ enum Command {
         /// Only show games whose title contains this.
         #[arg(long)]
         search: Option<String>,
+    },
+    /// Add gamestore to Steam as a non-Steam tile, to test it from Big Picture.
+    #[cfg(target_os = "linux")]
+    SteamInstall {
+        /// Tile name, as Steam shows it. It is half of what the appid derives from.
+        #[arg(long, default_value = gamestore_platform_linux::tile::TILE_NAME)]
+        name: String,
+        /// The gamestore arguments the tile runs.
+        #[arg(long, default_value = gamestore_platform_linux::tile::DEFAULT_COMMAND)]
+        command: String,
+        /// Write into this Steam account only.
+        #[arg(long)]
+        user: Option<u32>,
+        /// Write into every Steam account on the machine.
+        #[arg(long)]
+        all_users: bool,
+        /// Point the tile straight at the binary, with no terminal to show its output.
+        #[arg(long)]
+        no_terminal: bool,
+    },
+    /// Remove the gamestore tile from Steam.
+    #[cfg(target_os = "linux")]
+    SteamUninstall {
+        /// Tile name to remove; it has to match the one it was installed under.
+        #[arg(long, default_value = gamestore_platform_linux::tile::TILE_NAME)]
+        name: String,
+        /// Remove from this Steam account only.
+        #[arg(long)]
+        user: Option<u32>,
+        /// Remove from every Steam account on the machine.
+        #[arg(long)]
+        all_users: bool,
+        /// The tile was installed with --no-terminal.
+        #[arg(long)]
+        no_terminal: bool,
     },
     /// Derive the Steam appid for a non-Steam shortcut, to compare against Steam.
     Appid {
@@ -261,6 +298,53 @@ fn run(cli: Cli) -> Result<()> {
                 "artwork:       expected under userdata/<user>/config/grid/ keyed on {appid} (unverified)"
             );
         }
+        #[cfg(target_os = "linux")]
+        Command::SteamInstall {
+            name,
+            command,
+            user,
+            all_users,
+            no_terminal,
+        } => {
+            let binary = current_binary()?;
+            let tile = steam::Tile {
+                name,
+                command,
+                terminal: !no_terminal,
+            };
+
+            steam::install(
+                &paths,
+                &platform.steam_root()?,
+                &binary,
+                &tile,
+                user,
+                all_users,
+            )?;
+        }
+        #[cfg(target_os = "linux")]
+        Command::SteamUninstall {
+            name,
+            user,
+            all_users,
+            no_terminal,
+        } => {
+            let binary = current_binary()?;
+            let tile = steam::Tile {
+                name,
+                command: String::new(),
+                terminal: !no_terminal,
+            };
+
+            steam::uninstall(
+                &paths,
+                &platform.steam_root()?,
+                &binary,
+                &tile,
+                user,
+                all_users,
+            )?;
+        }
         Command::Config => {
             let path = paths.config_file();
             let origin = if path.exists() {
@@ -274,6 +358,17 @@ fn run(cli: Cli) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Where this binary is, which is what a Steam tile has to point at.
+///
+/// It is resolved rather than assumed so that a tile installed from a `cargo run`
+/// checkout points at the checkout, and one installed from `~/.local/bin` points
+/// there — and so the difference is visible in what the command prints.
+#[cfg(target_os = "linux")]
+fn current_binary() -> Result<std::path::PathBuf> {
+    std::env::current_exe()
+        .map_err(|error| gamestore_core::Error::io("finding the gamestore binary", error))
 }
 
 #[cfg(test)]
