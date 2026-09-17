@@ -16,6 +16,7 @@ gamestore-platform-windows = { path = "platform-windows" }
 
 clap = { version = "4", features = ["derive"] }
 directories = "6"
+keyring = "4"
 percent-encoding = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

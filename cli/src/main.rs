@@ -8,8 +8,8 @@ use std::process::ExitCode;
 use std::io::{BufRead, Write};
 
 use clap::{Parser, Subcommand};
-use gamestore_core::auth;
 use gamestore_core::http::UreqClient;
+use gamestore_core::tokens::{KeyringStore, Session, TokenStore};
 use gamestore_core::{APP_NAME, Config, Paths, Platform, Result, logging};
 use tracing::error;
 
@@ -30,6 +30,39 @@ enum Command {
     Config,
     /// Log in to GOG: open the printed URL, then paste where you land.
     Login,
+    /// Forget the stored GOG session.
+    Logout,
+}
+
+/// The keyring entry the session is stored under. One account name per Steam user
+/// on a shared machine is what `tok` still has to wire up.
+const ACCOUNT: &str = "gog";
+
+fn session(config: &Config, paths: &Paths) -> Result<Session<UreqClient, KeyringStore>> {
+    let credentials = config.credentials(paths, |key| std::env::var(key).ok())?;
+
+    Ok(Session::new(
+        credentials,
+        UreqClient::new(),
+        KeyringStore::new(ACCOUNT),
+    ))
+}
+
+fn report_session(session: &Session<UreqClient, KeyringStore>) {
+    match (session.user_id(), session.expires_at()) {
+        (Some(user_id), Some(expires_at)) => {
+            println!("Logged in as GOG user {user_id}.");
+            match expires_at.duration_since(std::time::SystemTime::now()) {
+                Ok(left) => println!(
+                    "The access token is valid for {} minutes; it refreshes itself after that.",
+                    left.as_secs() / 60
+                ),
+                Err(_) => println!("The access token has expired and will be refreshed on use."),
+            }
+        }
+        _ => println!("No session stored."),
+    }
+    println!("Stored in: {}", session.store().describe());
 }
 
 fn main() -> ExitCode {
@@ -62,13 +95,24 @@ fn run(cli: Cli) -> Result<()> {
                 Ok(root) => println!("steam root:   {}", root.display()),
                 Err(error) => println!("steam root:   unavailable ({error})"),
             }
+            match session(&config, &paths) {
+                Ok(mut session) => match session.restore() {
+                    Ok(true) => println!(
+                        "gog session:  logged in as {}",
+                        session.user_id().unwrap_or("?")
+                    ),
+                    Ok(false) => println!("gog session:  none stored"),
+                    Err(error) => println!("gog session:  unavailable ({error})"),
+                },
+                Err(error) => println!("gog session:  unavailable ({error})"),
+            }
         }
         Command::Login => {
-            let credentials = config.credentials(&paths, |key| std::env::var(key).ok())?;
+            let mut session = session(&config, &paths)?;
 
             println!("Open this address and log in to GOG:");
             println!();
-            println!("  {}", credentials.authorization_url());
+            println!("  {}", session.credentials().authorization_url());
             println!();
             println!("GOG then lands on a page whose address carries `code=...`.");
             print!("Paste that address (or just the code) here: ");
@@ -82,21 +126,13 @@ fn run(cli: Cli) -> Result<()> {
                 .read_line(&mut pasted)
                 .map_err(|error| gamestore_core::Error::io("reading from the terminal", error))?;
 
-            let code = auth::extract_code(&pasted)?;
-            let tokens = auth::exchange_code(&UreqClient::new(), &credentials, &code)?;
-
-            println!("Logged in as GOG user {}.", tokens.user_id);
-            match tokens
-                .expires_at
-                .duration_since(std::time::SystemTime::now())
-            {
-                Ok(left) => println!(
-                    "The access token is valid for {} minutes.",
-                    left.as_secs() / 60
-                ),
-                Err(_) => println!("The access token is already expired."),
-            }
-            println!("Nothing is stored yet: keeping tokens in the keyring is the `tok` task.");
+            session.log_in(&pasted)?;
+            report_session(&session);
+        }
+        Command::Logout => {
+            let mut session = session(&config, &paths)?;
+            session.log_out()?;
+            println!("The stored session was forgotten.");
         }
         Command::Config => {
             let path = paths.config_file();

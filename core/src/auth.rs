@@ -14,7 +14,7 @@ use std::fmt;
 use std::time::{Duration, SystemTime};
 
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::http::{HttpClient, Response};
 use crate::{Error, Result};
@@ -157,7 +157,11 @@ pub fn refresh(
 }
 
 /// Tokens for an authenticated session.
-#[derive(Clone, PartialEq, Eq)]
+///
+/// It is serializable because it has to be stored (see [`crate::tokens`]); the
+/// `Debug` impl below is hand-written so that storing it and printing it stay
+/// different things.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenSet {
     pub access_token: String,
     pub refresh_token: String,
@@ -177,7 +181,7 @@ impl TokenSet {
             .unwrap_or(true)
     }
 
-    fn from_response(response: TokenResponse, now: SystemTime) -> Self {
+    pub(crate) fn from_response(response: TokenResponse, now: SystemTime) -> Self {
         Self {
             access_token: response.access_token,
             refresh_token: response.refresh_token,
@@ -205,7 +209,7 @@ impl fmt::Debug for TokenSet {
 }
 
 #[derive(Debug, Deserialize)]
-struct TokenResponse {
+pub(crate) struct TokenResponse {
     access_token: String,
     refresh_token: String,
     user_id: String,
