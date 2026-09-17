@@ -24,9 +24,19 @@ impl Response {
 }
 
 /// Minimal HTTP surface: enough for OAuth2 and the GOG JSON APIs.
+///
+/// The authorized form is the one implementors provide, and the plain one
+/// delegates to it. That way round on purpose: a trait where `get` is required and
+/// the authorized call defaults to it would let a client silently drop the
+/// `Authorization` header and look like an expired session.
 pub trait HttpClient {
-    /// GET `url` and read the whole body.
-    fn get(&self, url: &str) -> Result<Response>;
+    /// GET `url`, sending `bearer` as an OAuth2 bearer token when there is one.
+    fn get_authorized(&self, url: &str, bearer: Option<&str>) -> Result<Response>;
+
+    /// GET `url` with no credentials.
+    fn get(&self, url: &str) -> Result<Response> {
+        self.get_authorized(url, None)
+    }
 }
 
 /// Blocking HTTP client. Concurrency is a bounded worker pool over this, which is
@@ -61,8 +71,13 @@ impl Default for UreqClient {
 }
 
 impl HttpClient for UreqClient {
-    fn get(&self, url: &str) -> Result<Response> {
-        let mut response = self.agent.get(url).call().map_err(|error| Error::Http {
+    fn get_authorized(&self, url: &str, bearer: Option<&str>) -> Result<Response> {
+        let mut request = self.agent.get(url);
+        if let Some(token) = bearer {
+            request = request.header("Authorization", &format!("Bearer {token}"));
+        }
+
+        let mut response = request.call().map_err(|error| Error::Http {
             url: redact(url),
             reason: error.to_string(),
         })?;

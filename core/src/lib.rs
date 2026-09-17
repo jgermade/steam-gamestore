@@ -4,13 +4,19 @@
 //! behind a trait, the GOG OAuth2 flow, and the [`Platform`] trait that the
 //! `platform-*` crates implement. The catalog and the downloader land here too.
 
+pub mod atomic;
 pub mod auth;
+pub mod catalog;
 pub mod config;
 pub mod error;
 pub mod http;
 pub mod logging;
 pub mod platform;
+pub mod registry;
+pub mod shortcuts;
+pub mod steam;
 pub mod tokens;
+pub mod vdf;
 
 pub use config::{Config, Paths};
 pub use error::{Error, Result};

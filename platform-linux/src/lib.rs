@@ -1,5 +1,7 @@
-//! Linux side of gamestore: the Steam installation, and later the `shortcuts.vdf`
-//! writer, the `CompatToolMapping` writer and the generated launch wrappers.
+//! Linux side of gamestore: the Steam installation, the `shortcuts.vdf` writer,
+//! and later the `CompatToolMapping` writer and the generated launch wrappers.
+
+pub mod shortcuts;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};

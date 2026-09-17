@@ -43,6 +43,15 @@ or set GOG_CLIENT_ID and GOG_CLIENT_SECRET"
     #[error("{0}")]
     TokenStore(String),
 
+    #[error("{0}")]
+    Vdf(String),
+
+    #[error("the GOG library could not be read: {0}")]
+    Catalog(String),
+
+    #[error("{0}")]
+    Registry(String),
+
     #[error("not logged in to GOG; run `gamestore login`")]
     NotLoggedIn,
 
@@ -54,6 +63,14 @@ or set GOG_CLIENT_ID and GOG_CLIENT_SECRET"
 }
 
 impl Error {
+    /// An error about a path that is not an [`std::io::Error`].
+    pub fn io_path(path: &std::path::Path, problem: &str) -> Self {
+        Self::Io {
+            operation: format!("{} {problem}", path.display()),
+            source: std::io::Error::from(std::io::ErrorKind::InvalidInput),
+        }
+    }
+
     /// Attach a human-readable operation to an [`std::io::Error`].
     pub fn io(operation: impl Into<String>, source: std::io::Error) -> Self {
         Self::Io {
