@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 
 use gamestore_core::atomic::{self, Access};
-use gamestore_core::{Error, Paths, Result};
+use gamestore_core::{Paths, Result};
 
 /// Name of the tile, and therefore half of what its appid is derived from.
 pub const TILE_NAME: &str = "gamestore";
@@ -119,7 +119,12 @@ pub fn write_launcher(paths: &Paths, binary: &Path) -> Result<PathBuf> {
     Ok(script)
 }
 
+#[cfg(unix)]
 fn make_executable(path: &Path) -> Result<()> {
+    // Imported here rather than at the top of the module: this is the only thing
+    // in the file that builds an error, and off unix the import would be unused,
+    // which `-D warnings` turns into a failed Windows build.
+    use gamestore_core::Error;
     use std::os::unix::fs::PermissionsExt;
 
     let mut permissions = std::fs::metadata(path)
@@ -129,6 +134,14 @@ fn make_executable(path: &Path) -> Result<()> {
 
     std::fs::set_permissions(path, permissions)
         .map_err(|error| Error::io(format!("making {} executable", path.display()), error))
+}
+
+// This crate is only ever *used* on Linux, but it is in the workspace, so
+// `cargo clippy --workspace --target x86_64-pc-windows-msvc` compiles it too.
+// Off unix there is no mode to set, and nothing here will be run anyway.
+#[cfg(not(unix))]
+fn make_executable(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 /// Whether a Steam client is running right now.
@@ -223,6 +236,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn the_written_launcher_is_executable() {
         use std::os::unix::fs::PermissionsExt;
 
