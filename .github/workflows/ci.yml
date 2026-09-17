@@ -1,9 +1,12 @@
 name: CI
 
+# Every push, on every branch. A pull request from a branch in this repository is
+# already covered by the push that created it, and adding a `pull_request` trigger
+# only skipped duplicate jobs onto the PR — the checks a reviewer sees come from the
+# push. If an outside fork ever contributes, add `pull_request` back deliberately.
 on:
   push:
     branches: ["**"]
-  pull_request:
 
 permissions:
   contents: read
@@ -19,8 +22,6 @@ env:
 jobs:
   fmt:
     name: fmt
-    # Pushes cover branches in this repository; pull_request only adds forks.
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -31,7 +32,6 @@ jobs:
 
   check:
     name: ${{ matrix.name }}
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
