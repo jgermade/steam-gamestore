@@ -29,21 +29,42 @@ fixtures nobody has compared to the real thing. What it would take to close them
 Downloads (`man`, `dl`, `ver`), the install path (`inno`, `wrap`, `uninst`) and the
 controller UI are not started.
 
-What *can* be tried now: [`./install.sh`](install.sh) puts the binary on the machine,
-and [`gamestore steam-install`](#trying-it-from-steam) puts gamestore itself in the
+What *can* be tried now: [one line](#install) puts the binary on the machine, and
+[`gamestore steam-install`](#trying-it-from-steam) puts gamestore itself in the
 Steam library as a tile — which is how `appid` and `vdf` get their first look at a
 real Steam. `login` needs GOG client credentials, which is still question 3.
 
 ## Install
 
 ```sh
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/jgermade/steam-gamestore/main/install.sh | sh
 ```
 
-Builds from source and puts the binary in `~/.local/bin/gamestore`. Nothing outside
-that prefix is touched, so it needs no root and works unchanged on an immutable
-SteamOS; `--prefix DIR` moves it. It needs `cargo`, and says how to get one when
-there is none (`pacman -S rustup` on Arch and CachyOS).
+That puts the binary in `~/.local/bin/gamestore`. Nothing outside that prefix is
+touched, so it needs no root and works unchanged on an immutable SteamOS.
+
+It takes the released binary when there is one for this machine, and builds from
+source when there is not — which is what happens until the first release is cut, and
+what happens on any system the published binary will not start on. The build needs
+`cargo`, and the script says how to get one when there is none (`pacman -S rustup` on
+Arch and CachyOS).
+
+Options go after `--`, and the script is worth reading before it is run:
+
+```sh
+curl -fsSL .../install.sh | sh -s -- --prefix /opt/gamestore
+curl -fsSL .../install.sh | sh -s -- --from-source
+curl -fsSL .../install.sh | sh -s -- --version v0.1.0
+```
+
+From a checkout it always builds what is in front of it:
+
+```sh
+./install.sh            # or --debug, for a faster edit-run loop
+```
+
+Released archives are published with a `SHA256SUMS` file, and the installer refuses
+an archive that does not match it.
 
 ## Build and run
 
@@ -177,6 +198,29 @@ them. `STEAM_ROOT` points at a Steam installation the platform crates cannot
 guess, `GOG_CLIENT_ID` and `GOG_CLIENT_SECRET` carry the OAuth2 credentials, and
 `GAMESTORE_ACCOUNT` names the stored GOG session, and `GAMESTORE_LOG` sets the log
 filter (for example `GAMESTORE_LOG=debug`).
+
+## Releases
+
+Two workflows, and neither is run by pushing a tag by hand:
+
+- [`build.yml`](.github/workflows/build.yml) runs on every push to every branch:
+  `cargo fmt --check`, `clippy -D warnings`, `cargo test` and `cargo build`, on Linux
+  and on Windows. It is also callable, which is how the release uses it.
+- [`release.yml`](.github/workflows/release.yml) is run by hand from the Actions tab,
+  with one input: whether to raise the `patch`, `minor` or `major` version.
+
+A release run raises the version in the workspace `Cargo.toml`, refreshes
+`Cargo.lock`, commits, tags it `vX.Y.Z`, then calls `build.yml` **against that tag**
+and publishes what comes out. So the binaries attached to a release are built from
+exactly the commit the release names, and a failing check leaves the tag in place
+and publishes nothing — a tag can be deleted, a published release cannot be taken
+back. Tick `draft` to look it over before it goes out.
+
+Attached to each release: `gamestore-x86_64-unknown-linux-gnu.tar.gz`,
+`gamestore-x86_64-pc-windows-msvc.zip`, and `SHA256SUMS`. The Linux binary is
+linked against glibc, so a distribution older than the runner's will refuse it;
+`install.sh` checks that it starts and falls back to building from source when it
+does not.
 
 ## Contributing
 
