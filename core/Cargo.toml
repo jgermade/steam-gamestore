@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 directories.workspace = true
 keyring.workspace = true
+md5 = { package = "md-5", version = "0.10" }
 percent-encoding.workspace = true
 serde.workspace = true
 serde_json.workspace = true

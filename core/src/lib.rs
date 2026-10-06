@@ -11,6 +11,7 @@ pub mod config;
 pub mod error;
 pub mod handoff;
 pub mod http;
+pub mod installer;
 pub mod logging;
 pub mod platform;
 pub mod registry;

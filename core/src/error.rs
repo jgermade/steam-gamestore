@@ -52,6 +52,9 @@ or set GOG_CLIENT_ID and GOG_CLIENT_SECRET"
     #[error("{0}")]
     Registry(String),
 
+    #[error("download failed: {0}")]
+    Download(String),
+
     #[error("not logged in to GOG; run `gamestore login`")]
     NotLoggedIn,
 
