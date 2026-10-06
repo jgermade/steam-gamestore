@@ -6,6 +6,12 @@
 //! under Wine. For those, the game's real executable is started directly, with
 //! the arguments the launcher would have passed it.
 //!
+//! Some of those launchers also switch the display to 16-bit colour first, which
+//! late-90s games insist on. [`DEPTH16`] does that one job: a 2 KB Windows program
+//! (`assets/windows/depth16.c`) that switches, starts the game, waits for it and
+//! switches back. Under Wine the switch is emulated inside the game's prefix; the
+//! real display never changes.
+//!
 //! This is the same idea as the per-game fixes Lutris and Heroic keep. Each entry
 //! here was found on real hardware and says how; nothing is added on a guess.
 
@@ -31,16 +37,25 @@ struct Fix {
     id: &'static str,
     exe: &'static str,
     arguments: Arguments,
+    /// Start it through [`DEPTH16`].
+    depth16: bool,
 }
+
+/// The 16-bit colour launcher, built by `assets/windows/build.sh`.
+pub const DEPTH16: &[u8] = include_bytes!("../../assets/windows/depth16.exe");
+
+/// The name it is written under in a game's install directory.
+pub const DEPTH16_NAME: &str = "gamestore-depth16.exe";
 
 const FIXES: &[Fix] = &[
     // Moto Racer: GOG's MotoRacer.exe is "Moto Racer Launcher for GOG.com", a
     // settings window that throws "invalid window handle" under Proton and closes.
     // game.EXE is the game. The launcher passes it the `Params` line of
     // motoracer.ini, after the switches its D3D and ZBuffer settings stand for, and
-    // `-fullscreen`: without it the game runs windowed and stops at "16 bit screen
-    // mode required", because a window needs the desktop itself in 16-bit colour.
-    // Its own help text lists the switches. Found on the mini PC, 2026-10-06.
+    // `-fullscreen`; its own help text lists the switches. And it switches the
+    // display to 16-bit colour first: game.EXE checks the desktop's depth on start
+    // and stops at "16 bit screen mode required" otherwise, fullscreen or not.
+    // Found on the mini PC, 2026-10-06.
     Fix {
         id: "1207658895",
         exe: "game.EXE",
@@ -49,6 +64,7 @@ const FIXES: &[Fix] = &[
             file: "motoracer.ini",
             key: "Params",
         },
+        depth16: true,
     },
 ];
 
@@ -68,10 +84,26 @@ pub fn apply(id: &ProductId, install_dir: &Path, task: PlayTask) -> PlayTask {
             format!("{before} {from_ini}").trim().to_string()
         }
     };
+    let working_dir = install_dir.to_path_buf();
+    if fix.depth16 {
+        let launcher = install_dir.join(DEPTH16_NAME);
+        let current = std::fs::read(&launcher).ok();
+        if current.as_deref() == Some(DEPTH16) || std::fs::write(&launcher, DEPTH16).is_ok() {
+            let name = exe
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            return PlayTask {
+                exe: launcher,
+                arguments: format!("\"{name}\" {arguments}").trim().to_string(),
+                working_dir,
+            };
+        }
+    }
     PlayTask {
         exe,
         arguments,
-        working_dir: install_dir.to_path_buf(),
+        working_dir,
     }
 }
 
@@ -109,11 +141,12 @@ mod tests {
 
         let fixed = apply(&"1207658895".into(), temp.path(), task(temp.path()));
 
-        assert_eq!(fixed.exe, temp.path().join("game.EXE"));
+        assert_eq!(fixed.exe, temp.path().join(DEPTH16_NAME));
         assert_eq!(
             fixed.arguments,
-            "-fullscreen -D3D -ZBuffer -DoRealLock -NoDither -FrameRateMax60"
+            "\"game.EXE\" -fullscreen -D3D -ZBuffer -DoRealLock -NoDither -FrameRateMax60"
         );
+        assert_eq!(std::fs::read(&fixed.exe).unwrap(), DEPTH16);
     }
 
     #[test]
