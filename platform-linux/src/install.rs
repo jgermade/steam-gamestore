@@ -154,6 +154,7 @@ pub fn install(
     let id = &request.game.id;
 
     let mut registry = Registry::load(context.paths)?;
+    let previous = registry.get(id).and_then(|entry| entry.steam_appid);
     registry.claim(
         id,
         State::Downloading,
@@ -162,7 +163,7 @@ pub fn install(
     );
     registry.save(context.paths)?;
 
-    let result = run(context, request, &tool, &mut registry, events);
+    let result = run(context, request, &tool, previous, &mut registry, events);
     // Reload before recording the end: the UI may have been writing other games'
     // rows meanwhile, and this run only owns its own.
     let mut registry = Registry::load(context.paths)?;
@@ -189,6 +190,7 @@ fn run(
     context: &Context,
     request: &Request,
     tool: &ProtonTool,
+    previous: Option<u32>,
     registry: &mut Registry,
     events: &mut dyn FnMut(Event),
 ) -> Result<Outcome> {
@@ -266,6 +268,7 @@ fn run(
             installer::primary_task(&target, &game.id)?
         }
     };
+    let task = gamestore_core::fixes::apply(&game.id, &target, task);
 
     // 3. The shortcut it will get, and so its appid.
     let icon = target.join(format!("goggame-{}.ico", game.id));
@@ -304,6 +307,7 @@ fn run(
         launch_options: shortcut.launch_options.clone(),
         icon: shortcut.icon.clone(),
         tool: tool.name.clone(),
+        replaces: previous,
     };
     let running = tile::steam_is_running_from(context.steam_root);
     let (pending, restarted) = match (running, request.steam) {
@@ -324,13 +328,35 @@ fn run(
                      game is closed, and only the Steam files are left to write"
                 )));
             }
-            events(Event::StoppingSteam);
-            stop_steam(context.steam_root)?;
-            events(Event::WritingSteam);
-            let written = pending::write(context.steam_root, &tile);
-            start_steam(&mut warnings);
-            written?;
-            (false, true)
+            if pending::has_steam_unit() {
+                // Under a session unit the session may start Steam again the moment
+                // it stops, so stopping it and writing in the gap is a race. Queue
+                // instead, and restart through the unit: the hook writes the queue
+                // before Steam starts, when it is certainly not running.
+                pending::queue(paths, &tile)?;
+                ensure_hook()?;
+                events(Event::StoppingSteam);
+                pending::restart_steam_and_wait()?;
+                let applied = !pending::list(paths)
+                    .iter()
+                    .any(|(_, queued)| queued.game_id == tile.game_id);
+                if !applied {
+                    warnings.push(
+                        "Steam restarted but the tile is still queued; it is added the next \
+                         time Steam starts"
+                            .to_string(),
+                    );
+                }
+                (!applied, true)
+            } else {
+                events(Event::StoppingSteam);
+                stop_steam(context.steam_root)?;
+                events(Event::WritingSteam);
+                let written = pending::write(context.steam_root, &tile);
+                start_steam(&mut warnings);
+                written?;
+                (false, true)
+            }
         }
         (true, SteamPolicy::Refuse) => {
             // Steam started while this was downloading; keep the work.
@@ -349,6 +375,19 @@ fn run(
         art,
         warnings,
     })
+}
+
+/// Install the steam-launcher drop-in if it is not there yet.
+fn ensure_hook() -> Result<()> {
+    let config_home = directories::BaseDirs::new()
+        .map(|dirs| dirs.config_dir().to_path_buf())
+        .ok_or(Error::MissingDirectory("config"))?;
+    if !pending::hook_installed(&config_home) {
+        let binary = std::env::current_exe()
+            .map_err(|error| Error::io("finding the gamestore binary", error))?;
+        pending::hook(&config_home, &binary, false)?;
+    }
+    Ok(())
 }
 
 /// Where the installer's log for `game` goes.
@@ -381,18 +420,12 @@ fn fetch_art(
     Ok(arts.len())
 }
 
-/// Stop Steam and wait for it to be gone. Under a gamescope session Steam is a
-/// systemd unit that is restarted the moment it exits, so the unit is stopped;
-/// anywhere else Steam is asked to shut down.
+/// Stop a Steam that is not run by a session unit, and wait for it to be gone.
 fn stop_steam(steam_root: &Path) -> Result<()> {
-    let status = if pending::has_steam_unit() {
-        Command::new("systemctl")
-            .args(["--user", "stop", pending::STEAM_UNIT])
-            .status()
-    } else {
-        Command::new("steam").arg("-shutdown").status()
-    };
-    status.map_err(|error| Error::io("stopping Steam", error))?;
+    Command::new("steam")
+        .arg("-shutdown")
+        .status()
+        .map_err(|error| Error::io("stopping Steam", error))?;
 
     let deadline = Instant::now() + Duration::from_secs(60);
     while tile::steam_is_running_from(steam_root) {
@@ -407,13 +440,7 @@ fn stop_steam(steam_root: &Path) -> Result<()> {
 }
 
 fn start_steam(warnings: &mut Vec<String>) {
-    if pending::has_steam_unit() {
-        let _ = Command::new("systemctl")
-            .args(["--user", "start", pending::STEAM_UNIT])
-            .status();
-    } else {
-        warnings.push("start Steam again to see the new tile".to_string());
-    }
+    warnings.push("start Steam again to see the new tile".to_string());
 }
 
 #[cfg(test)]

@@ -39,6 +39,11 @@ pub struct PendingTile {
     pub icon: String,
     /// The compatibility tool's internal name.
     pub tool: String,
+    /// The appid of the game's previous tile, when it had one under a different
+    /// appid: it is removed, with its mapping and artwork, so a game never ends up
+    /// with two tiles.
+    #[serde(default)]
+    pub replaces: Option<u32>,
 }
 
 impl PendingTile {
@@ -102,6 +107,20 @@ pub fn list(paths: &Paths) -> Vec<(PathBuf, PendingTile)> {
 pub fn write(steam_root: &Path, tile: &PendingTile) -> Result<()> {
     let shortcut = tile.shortcut();
     let users = shortcuts::steam_users(steam_root)?;
+    if let Some(old) = tile.replaces.filter(|old| *old != shortcut.appid()) {
+        // From every account, not only the ones getting the new tile: the old one
+        // may have been given to more.
+        for user in &users {
+            let mut existing = shortcuts::read(user)?;
+            if existing.remove(old) {
+                shortcuts::save(user, &existing)?;
+            }
+            for kind in gamestore_core::artwork::Kind::ALL {
+                gamestore_core::artwork::remove_kind(&user.grid_dir(), old, kind);
+            }
+        }
+        proton::unmap(steam_root, old)?;
+    }
     for id in &tile.users {
         let Some(user) = users.iter().find(|user| user.id == *id) else {
             continue;
@@ -213,6 +232,22 @@ pub fn restart_steam() -> Result<()> {
     }
 }
 
+/// Restart Steam through its unit and wait until it has started again, which
+/// includes the drop-in having run. For the CLI, which is not inside Steam.
+pub fn restart_steam_and_wait() -> Result<()> {
+    let status = std::process::Command::new("systemctl")
+        .args(["--user", "restart", STEAM_UNIT])
+        .status()
+        .map_err(|error| Error::io("restarting Steam", error))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(Error::Steam(format!(
+            "systemctl could not restart {STEAM_UNIT}"
+        )))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,6 +271,7 @@ mod tests {
             launch_options: String::new(),
             icon: String::new(),
             tool: "proton_11".to_string(),
+            replaces: None,
         }
     }
 
@@ -273,6 +309,33 @@ mod tests {
         assert_eq!(shortcuts::read(&user).unwrap().len(), 2);
         let config = std::fs::read_to_string(root.join("config/config.vdf")).unwrap();
         assert!(config.contains(&tile("1").appid().to_string()), "{config}");
+    }
+
+    #[test]
+    fn a_tile_that_replaces_another_removes_it_and_its_mapping() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = steam_root(temp.path());
+        let old = tile("1");
+        write(&root, &old).unwrap();
+        let grid = root.join("userdata/42/config/grid");
+        std::fs::create_dir_all(&grid).unwrap();
+        std::fs::write(grid.join(format!("{}p.png", old.appid())), "art").unwrap();
+
+        let mut new = tile("1");
+        new.exe = "/games/1/real.exe".to_string();
+        new.replaces = Some(old.appid());
+        write(&root, &new).unwrap();
+
+        let user = SteamUser {
+            id: 42,
+            dir: root.join("userdata/42"),
+        };
+        let shortcuts = shortcuts::read(&user).unwrap();
+        assert_eq!(shortcuts.appids(), [new.appid()]);
+        let config = std::fs::read_to_string(root.join("config/config.vdf")).unwrap();
+        assert!(!config.contains(&old.appid().to_string()), "{config}");
+        assert!(config.contains(&new.appid().to_string()), "{config}");
+        assert!(!grid.join(format!("{}p.png", old.appid())).exists());
     }
 
     #[test]

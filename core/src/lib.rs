@@ -10,6 +10,7 @@ pub mod auth;
 pub mod catalog;
 pub mod config;
 pub mod error;
+pub mod fixes;
 pub mod handoff;
 pub mod http;
 pub mod installer;
