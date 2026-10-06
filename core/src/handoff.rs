@@ -262,10 +262,10 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<Request> {
         if header.is_empty() {
             break;
         }
-        if let Some((name, value)) = header.split_once(':') {
-            if name.trim().eq_ignore_ascii_case("content-length") {
-                content_length = value.trim().parse().map_err(|_| invalid())?;
-            }
+        if let Some((name, value)) = header.split_once(':')
+            && name.trim().eq_ignore_ascii_case("content-length")
+        {
+            content_length = value.trim().parse().map_err(|_| invalid())?;
         }
     }
     if content_length > MAX_REQUEST {

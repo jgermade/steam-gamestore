@@ -53,6 +53,13 @@ enum Command {
         #[arg(long)]
         search: Option<String>,
     },
+    /// Open the controller UI: browse the library and install from the sofa.
+    #[cfg(target_os = "linux")]
+    Ui {
+        /// Installer language, when GOG has more than one.
+        #[arg(long, default_value = "en")]
+        language: String,
+    },
     /// Install a GOG game and add it to Steam, running under Proton.
     #[cfg(target_os = "linux")]
     Install {
@@ -387,6 +394,41 @@ fn run(cli: Cli) -> Result<()> {
             );
         }
         #[cfg(target_os = "linux")]
+        #[cfg(target_os = "linux")]
+        Command::Ui { language } => {
+            let steam_root = platform.steam_root()?;
+            let catalog = match gamestore_core::catalog::Catalog::load(&paths)? {
+                Some(cached) => cached,
+                None => {
+                    let mut stored = open(&config, &paths)?;
+                    stored.session.restore()?;
+                    let token = stored.session.access_token()?;
+                    gamestore_core::catalog::load_or_fetch(
+                        &paths,
+                        &UreqClient::new(),
+                        &token,
+                        SystemTime::now(),
+                    )?
+                }
+            };
+            let token: gamestore_ui::TokenSource = {
+                let (config, paths) = (config.clone(), paths.clone());
+                std::sync::Arc::new(move || {
+                    let mut stored = open(&config, &paths)?;
+                    stored.session.restore()?;
+                    stored.session.access_token()
+                })
+            };
+            let machine = gamestore_ui::Machine {
+                users: gamestore_platform_linux::shortcuts::steam_users(&steam_root)?,
+                config: config.clone(),
+                paths: paths.clone(),
+                steam_root,
+                token,
+                language,
+            };
+            gamestore_ui::run(machine, catalog.games)?;
+        }
         #[cfg(target_os = "linux")]
         Command::Install {
             game,

@@ -61,6 +61,9 @@ or set GOG_CLIENT_ID and GOG_CLIENT_SECRET"
     #[error("artwork: {0}")]
     Artwork(String),
 
+    #[error("the UI could not start: {0}")]
+    Ui(String),
+
     #[error("not logged in to GOG; run `gamestore login`")]
     NotLoggedIn,
 

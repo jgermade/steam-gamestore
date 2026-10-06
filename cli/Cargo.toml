@@ -20,6 +20,7 @@ tracing.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gamestore-platform-linux.workspace = true
+gamestore-ui.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 gamestore-platform-windows.workspace = true
