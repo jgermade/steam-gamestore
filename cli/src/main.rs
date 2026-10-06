@@ -17,6 +17,8 @@ use gamestore_core::tokens::{self, Session, TokenStore};
 use gamestore_core::{APP_NAME, Config, Paths, Platform, Result, logging};
 use tracing::error;
 
+#[cfg(target_os = "linux")]
+mod install;
 mod platform;
 #[cfg(target_os = "linux")]
 mod steam;
@@ -50,6 +52,27 @@ enum Command {
         /// Only show games whose title contains this.
         #[arg(long)]
         search: Option<String>,
+    },
+    /// Install a GOG game and add it to Steam, running under Proton.
+    #[cfg(target_os = "linux")]
+    Install {
+        /// The game: its GOG id, its title, or a part of the title only it has.
+        game: String,
+        /// Installer language, when GOG has more than one.
+        #[arg(long, default_value = "en")]
+        language: String,
+        /// Add the tile to this Steam account only.
+        #[arg(long)]
+        user: Option<u32>,
+        /// Add the tile to every Steam account on the machine.
+        #[arg(long)]
+        all_users: bool,
+        /// Stop Steam for the few seconds its files take, and start it again.
+        #[arg(long)]
+        restart_steam: bool,
+        /// Do not fetch library artwork.
+        #[arg(long)]
+        no_art: bool,
     },
     /// Add gamestore to Steam as a non-Steam tile, to test it from Big Picture.
     #[cfg(target_os = "linux")]
@@ -354,6 +377,40 @@ fn run(cli: Cli) -> Result<()> {
             );
         }
         #[cfg(target_os = "linux")]
+        #[cfg(target_os = "linux")]
+        Command::Install {
+            game,
+            language,
+            user,
+            all_users,
+            restart_steam,
+            no_art,
+        } => {
+            let mut stored = open(&config, &paths)?;
+            stored.session.restore()?;
+            let token = stored.session.access_token()?;
+            let catalog = gamestore_core::catalog::load_or_fetch(
+                &paths,
+                &UreqClient::new(),
+                &token,
+                SystemTime::now(),
+            )?;
+            install::run(
+                &config,
+                &paths,
+                &platform.steam_root()?,
+                &token,
+                &catalog,
+                &install::Options {
+                    query: game,
+                    language,
+                    user,
+                    all_users,
+                    restart_steam,
+                    no_art,
+                },
+            )?;
+        }
         Command::SteamInstall {
             name,
             command,

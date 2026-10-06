@@ -177,9 +177,69 @@ pub fn steam_is_running_in(proc_dir: &Path) -> bool {
     })
 }
 
+/// Whether the Steam client that owns `steam_root` is running.
+///
+/// A client is matched to a root through `/proc/<pid>/exe`, which points at
+/// `<root>/ubuntu12_32/steam`. A Steam running from another root does not own this
+/// root's files, so it does not count. When the link cannot be read the process is
+/// assumed to be this root's: wrongly saying Steam is running costs a retry,
+/// wrongly saying it is not costs a tile.
+pub fn steam_is_running_from(steam_root: &Path) -> bool {
+    steam_is_running_from_in(Path::new("/proc"), steam_root)
+}
+
+/// The same check against an arbitrary `/proc`, so it can be tested.
+pub fn steam_is_running_from_in(proc_dir: &Path, steam_root: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(proc_dir) else {
+        return false;
+    };
+    let root = steam_root
+        .canonicalize()
+        .unwrap_or_else(|_| steam_root.to_path_buf());
+
+    entries.flatten().any(|entry| {
+        let numeric = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.parse::<u32>().is_ok());
+        let is_steam = std::fs::read_to_string(entry.path().join("comm"))
+            .is_ok_and(|comm| comm.trim() == "steam");
+        if !numeric || !is_steam {
+            return false;
+        }
+        match std::fs::read_link(entry.path().join("exe")) {
+            Ok(exe) => exe.parent().and_then(Path::parent).is_none_or(|owner| {
+                owner.canonicalize().unwrap_or_else(|_| owner.to_path_buf()) == root
+            }),
+            Err(_) => true,
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn steam_counts_only_for_the_root_it_runs_from() {
+        let temp = tempfile::tempdir().unwrap();
+        let proc_dir = temp.path().join("proc");
+        let ours = temp.path().join("ours");
+        let theirs = temp.path().join("theirs");
+        std::fs::create_dir_all(ours.join("ubuntu12_32")).unwrap();
+        std::fs::create_dir_all(theirs.join("ubuntu12_32")).unwrap();
+        let process = proc_dir.join("42");
+        std::fs::create_dir_all(&process).unwrap();
+        std::fs::write(process.join("comm"), "steam\n").unwrap();
+        std::os::unix::fs::symlink(theirs.join("ubuntu12_32/steam"), process.join("exe")).unwrap();
+
+        assert!(!steam_is_running_from_in(&proc_dir, &ours));
+        assert!(steam_is_running_from_in(&proc_dir, &theirs));
+
+        // Without a readable link it is assumed to be ours.
+        std::fs::remove_file(process.join("exe")).unwrap();
+        assert!(steam_is_running_from_in(&proc_dir, &ours));
+    }
 
     fn paths_in(dir: &Path) -> Paths {
         Paths {
