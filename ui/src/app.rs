@@ -4,7 +4,9 @@
 //! widgets: focus and scrolling are this module's own state, moved only by
 //! [`Nav`] actions, which is what a controller needs.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::process::Child;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{
@@ -12,12 +14,15 @@ use eframe::egui::{
     Vec2, pos2, text::LayoutJob, vec2,
 };
 use gamestore_core::catalog::{Game, Os, ProductId};
+use gamestore_core::details::{Details, Storage, human_size};
 use gamestore_core::registry::{Registry, State};
 use gamestore_platform_linux::{install, pending};
 
 use crate::covers::{self, Covers};
+use crate::icons;
 use crate::input::{Input, Nav};
 use crate::jobs::{Jobs, Machine, Progress};
+use crate::media::{Answer, Media};
 use crate::osk::{self, Keyboard};
 use crate::text::Text;
 use crate::theme;
@@ -79,6 +84,20 @@ pub struct App {
     input: Input,
     covers: Covers,
     jobs: Jobs,
+    media: Media,
+    details: HashMap<ProductId, Details>,
+    /// Details asked for, so each game is asked once.
+    asked: HashSet<ProductId>,
+    /// The current game's screenshots: requested, and the ones that arrived.
+    shots_asked: HashSet<usize>,
+    shots: HashMap<usize, Option<TextureHandle>>,
+    shots_of: Option<ProductId>,
+    shot: usize,
+    disk: HashMap<ProductId, u64>,
+    storage: Option<Option<Storage>>,
+    storage_asked: Option<Instant>,
+    /// A video playing in mpv, to stop it from the controller.
+    video: Arc<Mutex<Option<Child>>>,
     /// Which build each install started this session is of.
     building: HashMap<ProductId, Os>,
     loaded_at: Instant,
@@ -100,7 +119,8 @@ impl App {
         for game in &games {
             covers.request(game.id.clone());
         }
-        let jobs = Jobs::new(machine.clone(), wake);
+        let jobs = Jobs::new(machine.clone(), wake.clone());
+        let media = Media::new(machine.clone(), wake);
 
         let mut app = Self {
             machine,
@@ -121,6 +141,17 @@ impl App {
             input: Input::new(),
             covers,
             jobs,
+            media,
+            details: HashMap::new(),
+            asked: HashSet::new(),
+            shots_asked: HashSet::new(),
+            shots: HashMap::new(),
+            shots_of: None,
+            shot: 0,
+            disk: HashMap::new(),
+            storage: None,
+            storage_asked: None,
+            video: Arc::new(Mutex::new(None)),
             building: HashMap::new(),
             loaded_at: Instant::now() - Duration::from_secs(60),
             pending: 0,
@@ -218,6 +249,125 @@ impl App {
         self.jobs.install(game, os);
     }
 
+    fn current_details(&self) -> Option<&Details> {
+        self.current().and_then(|game| self.details.get(&game.id))
+    }
+
+    /// Show the focused game's detail, asking for what it needs.
+    fn open_detail(&mut self) {
+        let Some(game) = self.current().cloned() else {
+            return;
+        };
+        self.screen = Screen::Detail { button: 0 };
+        if self.asked.insert(game.id.clone()) {
+            self.media.details(game.id.clone());
+        }
+        if self.shots_of.as_ref() != Some(&game.id) {
+            // Only one game's screenshots are kept, to keep video memory small.
+            self.shots.clear();
+            self.shots_asked.clear();
+            self.shots_of = Some(game.id.clone());
+            self.shot = 0;
+        }
+        if let Some(path) = self
+            .known
+            .get(&game.id)
+            .filter(|known| known.state.is_some_and(State::is_playable))
+            .and_then(|known| known.install_path.clone())
+        {
+            self.media.disk_usage(game.id.clone(), path.into());
+        }
+    }
+
+    fn open_downloads(&mut self) {
+        self.screen = Screen::Downloads;
+        let stale = self
+            .storage_asked
+            .is_none_or(|at| at.elapsed() > Duration::from_secs(30));
+        if stale {
+            self.storage_asked = Some(Instant::now());
+            self.media
+                .storage(gamestore_platform_linux::proton::library_folders(
+                    &self.machine.steam_root,
+                ));
+        }
+    }
+
+    /// Ask for the screenshot on show and the next one, once each.
+    fn want_screenshots(&mut self) {
+        let Some(game) = self.current().cloned() else {
+            return;
+        };
+        let Some(details) = self.details.get(&game.id) else {
+            return;
+        };
+        let count = details.screenshots.len();
+        for index in [self.shot, (self.shot + 1) % count.max(1)] {
+            if index < count && self.shots_asked.insert(index) {
+                self.media.screenshot(
+                    game.id.clone(),
+                    index,
+                    details.screenshots[index].full.clone(),
+                );
+            }
+        }
+    }
+
+    fn video_playing(&self) -> bool {
+        let mut slot = self.video.lock().expect("not poisoned");
+        match slot.as_mut().map(Child::try_wait) {
+            Some(Ok(None)) => true,
+            Some(_) => {
+                *slot = None;
+                false
+            }
+            None => false,
+        }
+    }
+
+    fn stop_video(&self) {
+        if let Some(mut child) = self.video.lock().expect("not poisoned").take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    /// Play the game's first video in mpv, fullscreen, through yt-dlp. While it
+    /// plays the UI ignores the controller except B, which stops it.
+    fn play_video(&mut self) {
+        let Some(url) = self
+            .current_details()
+            .and_then(|d| d.videos.first())
+            .cloned()
+        else {
+            return;
+        };
+        let has = |tool: &str| {
+            std::process::Command::new("sh")
+                .args(["-c", &format!("command -v {tool}")])
+                .stdout(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        };
+        if !has("yt-dlp") || !has("mpv") {
+            self.notify(self.text.video_needs);
+            return;
+        }
+        let child = std::process::Command::new("mpv")
+            .args([
+                "--fs",
+                "--really-quiet",
+                "--ytdl-format=bestvideo[height<=?1080]+bestaudio/best",
+                &url,
+            ])
+            .stdin(std::process::Stdio::null())
+            .spawn();
+        match child {
+            Ok(child) => *self.video.lock().expect("not poisoned") = Some(child),
+            Err(error) => self.notify(error.to_string()),
+        }
+    }
+
     fn quit(&mut self, ctx: &egui::Context) {
         if self.any_active() {
             self.screen = Screen::ConfirmQuit { button: 1 };
@@ -288,6 +438,17 @@ impl App {
                         }
                         Some(DetailAction::Back) | None => self.screen = Screen::Grid,
                     },
+                    Nav::Previous | Nav::Next => {
+                        let count = self.current_details().map_or(0, |d| d.screenshots.len());
+                        if count > 0 {
+                            self.shot = if nav == Nav::Next {
+                                (self.shot + 1) % count
+                            } else {
+                                (self.shot + count - 1) % count
+                            };
+                        }
+                    }
+                    Nav::Action => self.play_video(),
                     Nav::Back => self.screen = Screen::Grid,
                     _ => {}
                 }
@@ -359,7 +520,7 @@ impl App {
                     self.selected = count - 1;
                 }
             }
-            Nav::Accept if count > 0 => self.screen = Screen::Detail { button: 0 },
+            Nav::Accept if count > 0 => self.open_detail(),
             Nav::Search => self.screen = Screen::Keyboard,
             Nav::Action if !self.filter.is_empty() => {
                 self.filter.pop();
@@ -373,7 +534,7 @@ impl App {
                 };
                 self.refilter();
             }
-            Nav::Menu => self.screen = Screen::Menu { button: 0 },
+            Nav::Menu => self.screen = Screen::Menu { button: 1 },
             // B never closes the store: it clears a search, or shows what is
             // downloading and installing.
             Nav::Back => {
@@ -381,7 +542,7 @@ impl App {
                     self.filter.clear();
                     self.refilter();
                 } else {
-                    self.screen = Screen::Downloads;
+                    self.open_downloads();
                 }
             }
             _ => {}
@@ -489,6 +650,32 @@ impl eframe::App for App {
         if self.loaded_at.elapsed() > Duration::from_secs(3) {
             self.reload();
         }
+        for answer in self.media.answers() {
+            match answer {
+                Answer::Details(id, details) => {
+                    self.details.insert(id, details);
+                }
+                Answer::Screenshot(id, index, image) => {
+                    if self.shots_of.as_ref() == Some(&id) {
+                        let texture = image.map(|image| {
+                            ctx.load_texture(
+                                format!("{id}-shot-{index}"),
+                                image,
+                                TextureOptions::LINEAR,
+                            )
+                        });
+                        self.shots.insert(index, texture);
+                    }
+                }
+                Answer::DiskUsage(id, bytes) => {
+                    self.disk.insert(id, bytes);
+                }
+                Answer::Storage(storage) => self.storage = Some(storage),
+            }
+        }
+        if matches!(self.screen, Screen::Detail { .. }) {
+            self.want_screenshots();
+        }
 
         // A physical keyboard types straight into the search, from any screen
         // where that makes sense.
@@ -509,8 +696,16 @@ impl eframe::App for App {
             }
         }
 
-        for nav in self.input.poll(&ctx) {
-            self.handle(nav, &ctx);
+        let navs = self.input.poll(&ctx);
+        if self.video_playing() {
+            // mpv has the screen; only B means something here: stop it.
+            if navs.contains(&Nav::Back) {
+                self.stop_video();
+            }
+        } else {
+            for nav in navs {
+                self.handle(nav, &ctx);
+            }
         }
 
         let screen = ui.max_rect();
@@ -588,13 +783,7 @@ struct Layout {
 impl App {
     fn layout(&self, screen: Rect) -> Layout {
         let margin = (screen.width() * 0.035).max(24.0);
-        let top = screen.min.y
-            + header_height(screen)
-            + if self.banner() {
-                banner_height(screen)
-            } else {
-                0.0
-            };
+        let top = screen.min.y + header_height(screen);
         let bottom = screen.max.y - footer_height(screen);
         let area = Rect::from_min_max(
             pos2(screen.min.x + margin, top),
@@ -613,10 +802,6 @@ impl App {
             gap,
             columns,
         }
-    }
-
-    fn banner(&self) -> bool {
-        self.pending_count() > 0
     }
 
     fn pending_count(&self) -> usize {
@@ -737,26 +922,6 @@ impl App {
             x = rect.min.x - 14.0;
         }
 
-        if self.banner() {
-            let band = Rect::from_min_size(
-                pos2(screen.min.x, header.max.y),
-                vec2(screen.width(), banner_height(screen)),
-            );
-            painter.rect_filled(band, 0.0, theme::WAITING);
-            painter.text(
-                band.center(),
-                Align2::CENTER_CENTER,
-                format!(
-                    "{} {} — Start: {}",
-                    self.pending_count(),
-                    text.pending_banner,
-                    text.restart_steam
-                ),
-                normal.clone(),
-                Color32::BLACK,
-            );
-        }
-
         // The covers.
         let clip = painter.with_clip_rect(layout.area.expand(layout.gap));
         if self.visible.is_empty() {
@@ -821,17 +986,12 @@ impl App {
             ("B", text.downloads),
             ("Start", text.menu),
         ];
+        let style = self.input.style();
         let mut x = footer.min.x + layout.area.min.x - screen.min.x;
         for (button, label) in hints {
-            let chip = painter.layout_no_wrap(button.to_string(), small.clone(), Color32::BLACK);
-            let chip_rect = Rect::from_min_size(
-                pos2(x, footer.center().y - chip.size().y / 2.0 - 4.0),
-                chip.size() + vec2(16.0, 8.0),
-            );
-            painter.rect_filled(chip_rect, 8.0, theme::TEXT);
-            painter.galley(chip_rect.min + vec2(8.0, 4.0), chip, Color32::BLACK);
+            let chip = icons::button(painter, pos2(x, footer.center().y), button, style, &small);
             let end = painter.text(
-                pos2(chip_rect.max.x + 10.0, footer.center().y),
+                pos2(chip.max.x + 10.0, footer.center().y),
                 Align2::LEFT_CENTER,
                 label,
                 small.clone(),
@@ -839,16 +999,34 @@ impl App {
             );
             x = end.max.x + 36.0;
         }
-        painter.text(
-            pos2(
-                footer.max.x - (layout.area.min.x - screen.min.x),
-                footer.center().y,
-            ),
-            Align2::RIGHT_CENTER,
-            format!("{} {}", self.visible.len(), text.results),
-            small,
-            theme::DIM,
-        );
+        // On the right: games waiting for Steam to restart, or the count.
+        let right = footer.max.x - (layout.area.min.x - screen.min.x);
+        if self.pending_count() > 0 {
+            let label = format!(
+                "{} {} · Start: {}",
+                self.pending_count(),
+                text.ready,
+                text.restart_steam
+            );
+            let galley = painter.layout_no_wrap(label, small.clone(), Color32::BLACK);
+            let rect = Rect::from_min_size(
+                pos2(
+                    right - galley.size().x - 32.0,
+                    footer.center().y - galley.size().y / 2.0 - 8.0,
+                ),
+                galley.size() + vec2(32.0, 16.0),
+            );
+            painter.rect_filled(rect, 20.0, theme::WAITING);
+            painter.galley(rect.min + vec2(16.0, 8.0), galley, Color32::BLACK);
+        } else {
+            painter.text(
+                pos2(right, footer.center().y),
+                Align2::RIGHT_CENTER,
+                format!("{} {}", self.visible.len(), text.results),
+                small,
+                theme::DIM,
+            );
+        }
     }
 
     fn draw_cover(
@@ -945,21 +1123,54 @@ impl App {
         }
     }
 
-    /// What is downloading or installing, and what finished this session.
+    /// What is downloading or installing, what finished this session, and how
+    /// the disk is used.
     fn draw_downloads(&self, painter: &egui::Painter, screen: Rect) {
         let text = self.text;
         painter.rect_filled(screen, 0.0, Color32::from_black_alpha(215));
         let panel = Rect::from_center_size(
             screen.center(),
-            vec2(screen.width() * 0.62, screen.height() * 0.74),
+            vec2(screen.width() * 0.66, screen.height() * 0.8),
         );
         painter.rect_filled(panel, 20.0, theme::PANEL);
-        let inner = panel.shrink(screen.height() * 0.04);
+        let inner = panel.shrink(screen.height() * 0.035);
+        let title = FontId::proportional(screen.height() * 0.042);
+        let font = FontId::proportional(screen.height() * 0.028);
+        let small = FontId::proportional(screen.height() * 0.021);
+
+        // Storage first: whether there is room is the question before installing.
         painter.text(
             inner.min,
             Align2::LEFT_TOP,
+            text.storage,
+            title.clone(),
+            theme::TEXT,
+        );
+        let bar = Rect::from_min_size(
+            inner.min + vec2(0.0, screen.height() * 0.065),
+            vec2(inner.width(), screen.height() * 0.032),
+        );
+        match &self.storage {
+            Some(Some(storage)) => draw_storage(painter, bar, storage, text, &small),
+            Some(None) => {}
+            None => {
+                painter.rect_filled(bar, 8.0, theme::TRACK);
+                painter.text(
+                    bar.center(),
+                    Align2::CENTER_CENTER,
+                    text.measuring,
+                    small.clone(),
+                    theme::DIM,
+                );
+            }
+        }
+
+        let list_top = bar.max.y + screen.height() * 0.085;
+        painter.text(
+            pos2(inner.min.x, list_top),
+            Align2::LEFT_TOP,
             text.downloads,
-            FontId::proportional(screen.height() * 0.045),
+            title,
             theme::TEXT,
         );
 
@@ -975,12 +1186,10 @@ impl App {
             Progress::Failed(_) => 2,
             Progress::Done { .. } => 3,
         });
-
-        let font = FontId::proportional(screen.height() * 0.03);
-        let small = FontId::proportional(screen.height() * 0.022);
+        let top = list_top + screen.height() * 0.06;
         if rows.is_empty() {
             painter.text(
-                inner.center(),
+                pos2(inner.center().x, (top + inner.max.y) / 2.0),
                 Align2::CENTER_CENTER,
                 text.downloads_empty,
                 font,
@@ -988,33 +1197,62 @@ impl App {
             );
             return;
         }
-        let row_height = screen.height() * 0.1;
+        let row_height = screen.height() * 0.105;
         let time = painter.ctx().input(|input| input.time) as f32;
         for (index, (game, progress)) in rows.iter().enumerate() {
-            let top = inner.min.y + screen.height() * 0.08 + index as f32 * row_height;
-            if top + row_height > inner.max.y {
+            let y = top + index as f32 * row_height;
+            if y + row_height > inner.max.y {
                 break;
             }
-            let row = Rect::from_min_size(
-                pos2(inner.min.x, top),
-                vec2(inner.width(), row_height * 0.86),
-            );
+            let row =
+                Rect::from_min_size(pos2(inner.min.x, y), vec2(inner.width(), row_height * 0.88));
             painter.rect_filled(row, 12.0, theme::BACKGROUND);
-            let build = match self.building.get(&game.id) {
-                Some(Os::Linux) => " · Linux",
-                Some(Os::Windows) => " · Windows",
-                _ => "",
-            };
-            painter.text(
-                row.min + vec2(20.0, 12.0),
-                Align2::LEFT_TOP,
-                format!("{}{build}", game.title),
-                font.clone(),
-                theme::TEXT,
+
+            // The cover, small, so the row is recognised before it is read.
+            let cover_height = row.height() - 16.0;
+            let cover = Rect::from_min_size(
+                row.min + vec2(8.0, 8.0),
+                vec2(
+                    cover_height * covers::WIDTH as f32 / covers::HEIGHT as f32,
+                    cover_height,
+                ),
             );
+            match self.textures.get(&game.id) {
+                Some(Some(texture)) => {
+                    painter.image(
+                        texture.id(),
+                        cover,
+                        Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                }
+                _ => {
+                    painter.rect_filled(cover, 6.0, theme::PLACEHOLDER);
+                }
+            }
+
+            let left = cover.max.x + 18.0;
+            let mut name_end = painter
+                .text(
+                    pos2(left, row.min.y + 12.0),
+                    Align2::LEFT_TOP,
+                    &game.title,
+                    font.clone(),
+                    theme::TEXT,
+                )
+                .max
+                .x;
+            if let Some(os) = self.building.get(&game.id) {
+                let size = font.size;
+                let icon =
+                    Rect::from_min_size(pos2(name_end + 14.0, row.min.y + 14.0), vec2(size, size));
+                icons::os(painter, icon, *os);
+                name_end = icon.max.x;
+            }
+            let _ = name_end;
             let (label, colour) = self.badge(&game.id).unwrap_or_default();
             painter.text(
-                pos2(row.max.x - 20.0, row.min.y + 12.0),
+                pos2(row.max.x - 20.0, row.min.y + 14.0),
                 Align2::RIGHT_TOP,
                 label,
                 small.clone(),
@@ -1025,19 +1263,19 @@ impl App {
                     reason.clone(),
                     small.clone(),
                     theme::FAILED,
-                    row.width() - 40.0,
+                    row.max.x - left - 20.0,
                 );
                 job.wrap.max_rows = 1;
                 job.wrap.overflow_character = Some('…');
                 painter.galley(
-                    pos2(row.min.x + 20.0, row.max.y - 34.0),
+                    pos2(left, row.max.y - 36.0),
                     painter.layout_job(job),
                     theme::FAILED,
                 );
             }
             let bar = Rect::from_min_max(
-                pos2(row.min.x + 20.0, row.max.y - 18.0),
-                pos2(row.max.x - 20.0, row.max.y - 8.0),
+                pos2(left, row.max.y - 20.0),
+                pos2(row.max.x - 20.0, row.max.y - 10.0),
             );
             match progress {
                 Progress::Downloading { fraction, .. } => {
@@ -1075,12 +1313,16 @@ impl App {
     fn draw_detail(&self, painter: &egui::Painter, screen: Rect, button: usize) {
         let Some(game) = self.current() else { return };
         let text = self.text;
-        painter.rect_filled(screen, 0.0, theme::BACKGROUND.gamma_multiply(0.96));
+        painter.rect_filled(screen, 0.0, theme::BACKGROUND.gamma_multiply(0.97));
+        let details = self.details.get(&game.id);
 
-        let margin = screen.width() * 0.07;
-        let cover_height = screen.height() * 0.62;
+        let margin = screen.width() * 0.045;
+        let top = screen.min.y + screen.height() * 0.08;
+
+        // Left: the cover. Middle: what the game is and what can be done.
+        let cover_height = screen.height() * 0.5;
         let cover = Rect::from_min_size(
-            pos2(screen.min.x + margin, screen.min.y + screen.height() * 0.16),
+            pos2(screen.min.x + margin, top),
             vec2(
                 cover_height * covers::WIDTH as f32 / covers::HEIGHT as f32,
                 cover_height,
@@ -1095,9 +1337,16 @@ impl App {
             &FontId::proportional(screen.height() * 0.025),
         );
 
+        // Right: the screenshots, as large as the screen allows.
+        let shot_width = screen.width() * 0.48;
+        let shot = Rect::from_min_size(
+            pos2(screen.max.x - margin - shot_width, top),
+            vec2(shot_width, shot_width * 9.0 / 16.0),
+        );
+
         let left = cover.max.x + margin * 0.6;
-        let width = screen.max.x - margin - left;
-        let mut y = cover.min.y;
+        let width = shot.min.x - margin * 0.6 - left;
+        let mut y = top;
         let write = |message: String, size: f32, colour: Color32, y: &mut f32| {
             let mut job = LayoutJob::simple(
                 message,
@@ -1105,85 +1354,164 @@ impl App {
                 colour,
                 width,
             );
-            job.wrap.max_rows = 6;
+            job.wrap.max_rows = 4;
             let galley = painter.layout_job(job);
             let height = galley.size().y;
             painter.galley(pos2(left, *y), galley, colour);
-            *y += height + screen.height() * 0.02;
+            *y += height + screen.height() * 0.016;
         };
 
-        write(game.title.clone(), 0.055, theme::TEXT, &mut y);
+        write(game.title.clone(), 0.048, theme::TEXT, &mut y);
         let known = self.known.get(&game.id).cloned().unwrap_or_default();
         if let Some((label, colour)) = self.badge(&game.id) {
-            write(label, 0.032, colour, &mut y);
-        }
-        match self.progress.get(&game.id) {
-            Some(Progress::Done { pending: true }) => write(
-                text.in_steam_after_restart.to_string(),
-                0.03,
-                theme::TEXT,
-                &mut y,
-            ),
-            _ if self.installed(&game.id) => {
-                write(text.play_in_steam.to_string(), 0.03, theme::TEXT, &mut y);
-                let build = match known.platform {
-                    Some(Os::Linux) => text.linux_build,
-                    _ => text.windows_build,
-                };
-                write(build.to_string(), 0.025, theme::DIM, &mut y);
-                if let Some(build) = &known.build {
-                    write(
-                        format!("{}: {build}", text.version),
-                        0.025,
-                        theme::DIM,
-                        &mut y,
-                    );
-                }
-                if let Some(path) = &known.install_path {
-                    write(
-                        format!("{}: {path}", text.install_path),
-                        0.025,
-                        theme::DIM,
-                        &mut y,
-                    );
-                }
-            }
-            _ => {}
-        }
-        if !game.has_windows_build() {
-            write(text.not_windows.to_string(), 0.03, theme::FAILED, &mut y);
-        }
-        if let Some(reason) = self.failure(&game.id) {
-            write(reason, 0.025, theme::FAILED, &mut y);
+            write(label, 0.03, colour, &mut y);
         }
 
-        // The actions.
-        let font = FontId::proportional(screen.height() * 0.035);
-        let mut x = left;
-        let y = cover.max.y - screen.height() * 0.08;
+        // Each build GOG has, with its icon and download size.
+        let line = screen.height() * 0.03;
+        for os in install::builds(game) {
+            let icon = Rect::from_min_size(pos2(left, y), vec2(line, line));
+            icons::os(painter, icon, os);
+            let size = details
+                .and_then(|details| details.size(os))
+                .map(|bytes| format!("{} {}", text.download_size, human_size(bytes)))
+                .unwrap_or_default();
+            let installed_here =
+                self.installed(&game.id) && known.platform.unwrap_or(Os::Windows) == os;
+            let name = match os {
+                Os::Linux => text.linux_build,
+                _ => text.windows_build,
+            };
+            let mut description = format!("{name}  ·  {size}");
+            if installed_here && let Some(bytes) = self.disk.get(&game.id) {
+                description.push_str(&format!("  ·  {} {}", text.on_disk, human_size(*bytes)));
+            }
+            painter.text(
+                pos2(icon.max.x + 14.0, icon.center().y),
+                Align2::LEFT_CENTER,
+                description,
+                FontId::proportional(screen.height() * 0.024),
+                if installed_here {
+                    theme::TEXT
+                } else {
+                    theme::DIM
+                },
+            );
+            y += line + screen.height() * 0.016;
+        }
+
+        if let Some(Progress::Done { pending: true }) = self.progress.get(&game.id) {
+            write(
+                text.in_steam_after_restart.to_string(),
+                0.026,
+                theme::TEXT,
+                &mut y,
+            );
+        } else if self.installed(&game.id) {
+            write(text.play_in_steam.to_string(), 0.026, theme::TEXT, &mut y);
+            if let Some(build) = &known.build {
+                write(
+                    format!("{}: {build}", text.version),
+                    0.022,
+                    theme::DIM,
+                    &mut y,
+                );
+            }
+        }
+        if let Some(reason) = self.failure(&game.id) {
+            write(reason, 0.022, theme::FAILED, &mut y);
+        }
+
+        // The actions, under the cover's bottom edge.
+        let font = FontId::proportional(screen.height() * 0.032);
+        let mut x = cover.min.x;
+        let buttons_y = cover.max.y + screen.height() * 0.05;
         for (index, action) in self.detail_buttons().iter().enumerate() {
-            let label = match action {
-                DetailAction::Install(_)
+            let (label, icon) = match action {
+                DetailAction::Install(os)
                     if self.failure(&game.id).is_some() && install::builds(game).len() == 1 =>
                 {
-                    text.retry
+                    (text.retry, Some(*os))
                 }
-                DetailAction::Install(Os::Linux) if install::builds(game).len() > 1 => {
-                    text.install_linux
-                }
-                DetailAction::Install(Os::Windows) if install::builds(game).len() > 1 => {
-                    text.install_windows
-                }
-                DetailAction::Install(_) => text.install,
-                DetailAction::Switch(Os::Linux) => text.switch_linux,
-                DetailAction::Switch(_) => text.switch_windows,
-                DetailAction::Restart => text.restart_steam,
-                DetailAction::Back => text.back,
+                DetailAction::Install(os) => (text.install, Some(*os)),
+                DetailAction::Switch(os) => (
+                    match os {
+                        Os::Linux => text.switch_linux,
+                        _ => text.switch_windows,
+                    },
+                    Some(*os),
+                ),
+                DetailAction::Restart => (text.restart_steam, None),
+                DetailAction::Back => (text.back, None),
             };
-            x = draw_button(painter, pos2(x, y), label, &font, index == button)
-                .max
-                .x
-                + 24.0;
+            x = draw_button(
+                painter,
+                pos2(x, buttons_y),
+                label,
+                icon,
+                &font,
+                index == button,
+            )
+            .max
+            .x + 24.0;
+        }
+
+        // Screenshots.
+        painter.rect_filled(shot, 14.0, theme::TRACK);
+        let count = details.map_or(0, |details| details.screenshots.len());
+        match self.shots.get(&self.shot) {
+            Some(Some(texture)) => {
+                painter.image(
+                    texture.id(),
+                    shot,
+                    Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+            }
+            _ if count == 0 && details.is_some() => {}
+            _ => {
+                painter.text(
+                    shot.center(),
+                    Align2::CENTER_CENTER,
+                    text.measuring,
+                    FontId::proportional(screen.height() * 0.024),
+                    theme::DIM,
+                );
+            }
+        }
+        let small = FontId::proportional(screen.height() * 0.022);
+        let style = self.input.style();
+        let hint_y = shot.max.y + screen.height() * 0.035;
+        let mut x = shot.min.x;
+        if count > 1 {
+            let chip = icons::button(painter, pos2(x, hint_y), "LB/RB", style, &small);
+            let end = painter.text(
+                pos2(chip.max.x + 10.0, hint_y),
+                Align2::LEFT_CENTER,
+                format!("{}  {}/{count}", text.screenshots, self.shot + 1),
+                small.clone(),
+                theme::DIM,
+            );
+            x = end.max.x + 36.0;
+        }
+        if details.is_some_and(|details| !details.videos.is_empty()) {
+            let chip = icons::button(painter, pos2(x, hint_y), "X", style, &small);
+            painter.text(
+                pos2(chip.max.x + 10.0, hint_y),
+                Align2::LEFT_CENTER,
+                text.video,
+                small.clone(),
+                theme::DIM,
+            );
+        }
+        if self.video_playing() {
+            painter.text(
+                pos2(shot.center().x, shot.max.y + screen.height() * 0.08),
+                Align2::CENTER_CENTER,
+                text.stop_video,
+                small,
+                theme::DIM,
+            );
         }
     }
 }
@@ -1192,11 +1520,18 @@ fn draw_button(
     painter: &egui::Painter,
     at: Pos2,
     label: &str,
+    icon: Option<Os>,
     font: &FontId,
     focused: bool,
 ) -> Rect {
     let galley = painter.layout_no_wrap(label.to_string(), font.clone(), Color32::BLACK);
-    let rect = Rect::from_min_size(at, galley.size() + vec2(64.0, 32.0));
+    let icon_size = galley.size().y;
+    let icon_room = if icon.is_some() {
+        icon_size + 14.0
+    } else {
+        0.0
+    };
+    let rect = Rect::from_min_size(at, galley.size() + vec2(64.0 + icon_room, 32.0));
     painter.rect_filled(rect, 14.0, if focused { theme::ACCENT } else { theme::KEY });
     if focused {
         painter.rect_stroke(
@@ -1206,14 +1541,65 @@ fn draw_button(
             StrokeKind::Outside,
         );
     }
-    painter.text(
-        rect.center(),
-        Align2::CENTER_CENTER,
-        label,
-        font.clone(),
+    let content = rect.min + vec2(32.0, 16.0);
+    if let Some(os) = icon {
+        icons::os(
+            painter,
+            Rect::from_min_size(content, vec2(icon_size, icon_size)),
+            os,
+        );
+    }
+    painter.galley(
+        content + vec2(icon_room, 0.0),
+        galley,
         if focused { Color32::BLACK } else { theme::TEXT },
     );
     rect
+}
+
+/// The disk as one bar: system and other, Steam, GOG, free, each labelled.
+fn draw_storage(painter: &egui::Painter, bar: Rect, storage: &Storage, text: &Text, font: &FontId) {
+    painter.rect_filled(bar, 8.0, theme::TRACK);
+    let total = storage.total.max(1) as f32;
+    let parts = [
+        (text.storage_other, storage.other(), theme::DIM),
+        ("Steam", storage.steam, Color32::from_rgb(70, 140, 230)),
+        ("GOG", storage.gog, theme::ACCENT),
+    ];
+    let mut x = bar.min.x;
+    for (_, bytes, colour) in parts {
+        let width = bar.width() * bytes as f32 / total;
+        painter.rect_filled(
+            Rect::from_min_max(
+                pos2(x, bar.min.y),
+                pos2((x + width).min(bar.max.x), bar.max.y),
+            ),
+            0.0,
+            colour,
+        );
+        x += width;
+    }
+    let mut x = bar.min.x;
+    let y = bar.max.y + 22.0;
+    for (label, bytes, colour) in
+        parts
+            .into_iter()
+            .chain([(text.storage_free, storage.free, theme::TRACK)])
+    {
+        painter.rect_filled(
+            Rect::from_min_size(pos2(x, y - 8.0), vec2(16.0, 16.0)),
+            4.0,
+            colour,
+        );
+        let end = painter.text(
+            pos2(x + 24.0, y),
+            Align2::LEFT_CENTER,
+            format!("{label} {}", human_size(bytes)),
+            font.clone(),
+            theme::TEXT,
+        );
+        x = end.max.x + 30.0;
+    }
 }
 
 fn draw_menu(painter: &egui::Painter, screen: Rect, title: &str, items: [&str; 3], focused: usize) {
@@ -1303,6 +1689,7 @@ fn draw_confirm(
             painter,
             pos2(x, inner.max.y - screen.height() * 0.07),
             label,
+            None,
             &font,
             index == focused,
         )
@@ -1329,10 +1716,6 @@ fn draw_notice(painter: &egui::Painter, screen: Rect, message: &str) {
 
 fn header_height(screen: Rect) -> f32 {
     screen.height() * 0.11
-}
-
-fn banner_height(screen: Rect) -> f32 {
-    screen.height() * 0.05
 }
 
 fn footer_height(screen: Rect) -> f32 {

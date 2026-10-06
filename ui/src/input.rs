@@ -72,6 +72,24 @@ impl Input {
         }
     }
 
+    /// How the face buttons should be drawn: in Xbox colours for an Xbox pad,
+    /// or for Steam's virtual pad, which is an Xbox 360 one.
+    pub fn style(&self) -> crate::icons::PadStyle {
+        let xbox = self.gilrs.as_ref().is_some_and(|gilrs| {
+            gilrs.gamepads().any(|(_, pad)| {
+                let name = pad.name().to_ascii_lowercase();
+                ["xbox", "x-box", "microsoft", "steam", "xinput"]
+                    .iter()
+                    .any(|mark| name.contains(mark))
+            })
+        });
+        if xbox {
+            crate::icons::PadStyle::Xbox
+        } else {
+            crate::icons::PadStyle::Plain
+        }
+    }
+
     /// The pads to listen to: Steam's virtual ones when there are any.
     fn listened(gilrs: &Gilrs, id: GamepadId) -> bool {
         let steam = |name: &str| name.to_ascii_lowercase().contains("steam");

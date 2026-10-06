@@ -14,8 +14,10 @@
 
 mod app;
 mod covers;
+mod icons;
 mod input;
 mod jobs;
+mod media;
 mod osk;
 mod text;
 mod theme;
