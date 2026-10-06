@@ -17,9 +17,10 @@ use crate::installer::{PlayTask, resolve_case};
 /// Where a fixed game takes its arguments from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Arguments {
-    /// A `key=value` line in an ini file in the install directory, the way the
-    /// launcher stores the options it passes.
+    /// `before`, then a `key=value` line in an ini file in the install
+    /// directory, the way the launcher stores the options it passes.
     Ini {
+        before: &'static str,
         file: &'static str,
         key: &'static str,
     },
@@ -33,14 +34,18 @@ struct Fix {
 }
 
 const FIXES: &[Fix] = &[
-    // Moto Racer: GOG's MotoRacer.exe is "Moto Racer Launcher for GOG.com", a .NET
-    // 4.8 settings window that throws "invalid window handle" under Proton and
-    // closes. game.EXE is the game, and the launcher passes it the `Params` line
-    // of motoracer.ini. Found on the mini PC, 2026-10-06.
+    // Moto Racer: GOG's MotoRacer.exe is "Moto Racer Launcher for GOG.com", a
+    // settings window that throws "invalid window handle" under Proton and closes.
+    // game.EXE is the game. The launcher passes it the `Params` line of
+    // motoracer.ini, after the switches its D3D and ZBuffer settings stand for, and
+    // `-fullscreen`: without it the game runs windowed and stops at "16 bit screen
+    // mode required", because a window needs the desktop itself in 16-bit colour.
+    // Its own help text lists the switches. Found on the mini PC, 2026-10-06.
     Fix {
         id: "1207658895",
         exe: "game.EXE",
         arguments: Arguments::Ini {
+            before: "-fullscreen -D3D -ZBuffer",
             file: "motoracer.ini",
             key: "Params",
         },
@@ -58,8 +63,9 @@ pub fn apply(id: &ProductId, install_dir: &Path, task: PlayTask) -> PlayTask {
         return task;
     }
     let arguments = match fix.arguments {
-        Arguments::Ini { file, key } => {
-            ini_value(&resolve_case(install_dir, file), key).unwrap_or_default()
+        Arguments::Ini { before, file, key } => {
+            let from_ini = ini_value(&resolve_case(install_dir, file), key).unwrap_or_default();
+            format!("{before} {from_ini}").trim().to_string()
         }
     };
     PlayTask {
@@ -104,7 +110,10 @@ mod tests {
         let fixed = apply(&"1207658895".into(), temp.path(), task(temp.path()));
 
         assert_eq!(fixed.exe, temp.path().join("game.EXE"));
-        assert_eq!(fixed.arguments, "-DoRealLock -NoDither -FrameRateMax60");
+        assert_eq!(
+            fixed.arguments,
+            "-fullscreen -D3D -ZBuffer -DoRealLock -NoDither -FrameRateMax60"
+        );
     }
 
     #[test]
