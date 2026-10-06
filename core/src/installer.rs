@@ -601,7 +601,7 @@ pub fn primary_task(install_dir: &Path, id: &ProductId) -> Result<PlayTask> {
         .max_by_key(|task| task.is_primary)
         .ok_or_else(|| Error::Install(format!("{} names no executable to play", info.display())))?;
 
-    let local = |windows: &str| install_dir.join(windows.replace('\\', "/"));
+    let local = |windows: &str| resolve_case(install_dir, windows);
     Ok(PlayTask {
         exe: local(task.path.as_deref().unwrap_or_default()),
         arguments: task.arguments.unwrap_or_default(),
@@ -611,6 +611,37 @@ pub fn primary_task(install_dir: &Path, id: &ProductId) -> Result<PlayTask> {
             .map(|dir| local(&dir))
             .unwrap_or_else(|| install_dir.to_path_buf()),
     })
+}
+
+/// `windows`, a path relative to `base` with either separator, as it is spelled on
+/// disk. GOG writes these paths for Windows, where case does not matter: Wolfenstein
+/// 3D's info says `DOSBOX\\dosbox.exe` for a file called `DOSBox.exe`. Wine finds
+/// it either way, but the path Steam stores and shows should be the real one. Each
+/// component that has no exact match takes the entry that matches it ignoring
+/// case; one with no match at all is kept as written.
+pub fn resolve_case(base: &Path, windows: &str) -> PathBuf {
+    let mut path = base.to_path_buf();
+    for part in windows
+        .split(['\\', '/'])
+        .filter(|part| !part.is_empty() && *part != ".")
+    {
+        let exact = path.join(part);
+        if exact.exists() {
+            path = exact;
+            continue;
+        }
+        let found = std::fs::read_dir(&path).ok().and_then(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.file_name())
+                .find(|name| name.to_string_lossy().eq_ignore_ascii_case(part))
+        });
+        path = match found {
+            Some(name) => path.join(name),
+            None => exact,
+        };
+    }
+    path
 }
 
 #[cfg(test)]
@@ -867,6 +898,22 @@ mod tests {
         assert!(error.to_string().contains("bytes 8..=11"), "{error}");
         let kept = std::fs::read(temp.path().join("setup.exe.part")).unwrap();
         assert_eq!(kept.len(), 8, "nothing past the last good chunk is kept");
+    }
+
+    #[test]
+    fn paths_from_windows_take_the_case_the_disk_has() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("DOSBOX")).unwrap();
+        std::fs::write(temp.path().join("DOSBOX/DOSBox.exe"), "MZ").unwrap();
+
+        assert_eq!(
+            resolve_case(temp.path(), "DOSBOX\\dosbox.exe"),
+            temp.path().join("DOSBOX/DOSBox.exe")
+        );
+        assert_eq!(
+            resolve_case(temp.path(), "dosbox/missing.exe"),
+            temp.path().join("DOSBOX/missing.exe")
+        );
     }
 
     /// The real `goggame-1955095293.info` Xeno Crisis's installer wrote.
