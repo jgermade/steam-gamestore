@@ -289,6 +289,13 @@ fn install(
 
     // 5. The Steam files, with Steam stopped.
     let restart = tile::steam_is_running_from(steam_root);
+    if restart && let Some(running) = tile::steam_game_running() {
+        return Err(Error::Steam(format!(
+            "a game is running under Steam (appid {running}), and stopping Steam would \
+             close it. Everything up to here is done and kept: run this again once the \
+             game is closed, and only the Steam files are left to write"
+        )));
+    }
     if restart {
         stop_steam(steam_root)?;
     }

@@ -177,6 +177,40 @@ pub fn steam_is_running_in(proc_dir: &Path) -> bool {
     })
 }
 
+/// The appid of a game Steam is running right now, if any.
+///
+/// Steam starts every game, shortcuts included, under its `reaper` process with
+/// `SteamLaunch AppId=<appid>` on the command line. Stopping Steam then would stop
+/// the game with it, so callers check this first.
+pub fn steam_game_running() -> Option<u32> {
+    steam_game_running_in(Path::new("/proc"))
+}
+
+/// The same check against an arbitrary `/proc`, so it can be tested.
+pub fn steam_game_running_in(proc_dir: &Path) -> Option<u32> {
+    std::fs::read_dir(proc_dir)
+        .ok()?
+        .flatten()
+        .find_map(|entry| {
+            let comm = std::fs::read_to_string(entry.path().join("comm")).ok()?;
+            if comm.trim() != "reaper" {
+                return None;
+            }
+            let cmdline = std::fs::read(entry.path().join("cmdline")).ok()?;
+            let args: Vec<String> = cmdline
+                .split(|byte| *byte == 0)
+                .map(|arg| String::from_utf8_lossy(arg).into_owned())
+                .collect();
+            if !args.iter().any(|arg| arg == "SteamLaunch") {
+                return None;
+            }
+            args.iter()
+                .find_map(|arg| arg.strip_prefix("AppId="))
+                .and_then(|appid| appid.parse().ok())
+                .or(Some(0))
+        })
+}
+
 /// Whether the Steam client that owns `steam_root` is running.
 ///
 /// A client is matched to a root through `/proc/<pid>/exe`, which points at
@@ -219,6 +253,28 @@ pub fn steam_is_running_from_in(proc_dir: &Path, steam_root: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_game_under_steams_reaper_is_found_with_its_appid() {
+        let temp = tempfile::tempdir().unwrap();
+        let process = temp.path().join("77");
+        std::fs::create_dir_all(&process).unwrap();
+        std::fs::write(process.join("comm"), "reaper\n").unwrap();
+        std::fs::write(
+            process.join("cmdline"),
+            b"/steam/ubuntu12_32/reaper\0SteamLaunch\0AppId=2907567421\0--\0proton\0",
+        )
+        .unwrap();
+
+        assert_eq!(steam_game_running_in(temp.path()), Some(2907567421));
+
+        std::fs::write(
+            process.join("cmdline"),
+            b"/steam/ubuntu12_32/reaper\0other\0",
+        )
+        .unwrap();
+        assert_eq!(steam_game_running_in(temp.path()), None);
+    }
 
     #[test]
     fn steam_counts_only_for_the_root_it_runs_from() {
