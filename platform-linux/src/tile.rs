@@ -48,6 +48,50 @@ pub fn launcher_path(paths: &Paths) -> PathBuf {
     paths.data_dir.join("steam").join("gamestore-tile.sh")
 }
 
+/// The tile's own Steam artwork, made by `assets/steam/make.sh`, as Steam names
+/// the files after the appid: portrait, wide, hero, logo.
+pub const ARTWORK: [(&str, &[u8]); 4] = [
+    ("p", include_bytes!("../../assets/steam/p.png")),
+    ("", include_bytes!("../../assets/steam/wide.png")),
+    ("_hero", include_bytes!("../../assets/steam/hero.png")),
+    ("_logo", include_bytes!("../../assets/steam/logo.png")),
+];
+
+/// The tile's icon.
+pub const ICON: &[u8] = include_bytes!("../../assets/steam/icon.png");
+
+/// Where the icon is written for the tile to point at.
+pub fn icon_path(paths: &Paths) -> PathBuf {
+    paths.data_dir.join("steam").join("gamestore-icon.png")
+}
+
+/// Write the icon where [`icon_path`] says.
+pub fn write_icon(paths: &Paths) -> Result<PathBuf> {
+    let path = icon_path(paths);
+    if let Some(parent) = path.parent() {
+        atomic::create_dir(parent, Access::Default)?;
+    }
+    atomic::write(&path, ICON, Access::Default)?;
+    Ok(path)
+}
+
+/// Write the tile's artwork into a Steam account's grid directory. Steam reads
+/// these whether it is running or not.
+pub fn write_artwork(grid_dir: &Path, appid: u32) -> Result<()> {
+    atomic::create_dir(grid_dir, Access::Default)?;
+    for (suffix, bytes) in ARTWORK {
+        for extension in ["png", "jpg", "jpeg", "webp"] {
+            let _ = std::fs::remove_file(grid_dir.join(format!("{appid}{suffix}.{extension}")));
+        }
+        atomic::write(
+            &grid_dir.join(format!("{appid}{suffix}.png")),
+            bytes,
+            Access::Default,
+        )?;
+    }
+    Ok(())
+}
+
 /// Quote a path for `sh`, so a space or a quote in it cannot end the word.
 fn quote(path: &Path) -> String {
     format!("'{}'", path.to_string_lossy().replace('\'', r"'\''"))

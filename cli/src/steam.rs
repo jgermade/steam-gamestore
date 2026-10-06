@@ -65,7 +65,12 @@ or --all-users for every one",
 }
 
 /// The shortcut gamestore registers for itself.
-pub fn shortcut(tile: &Tile, binary: &Path, launcher: Option<&Path>) -> Shortcut {
+pub fn shortcut(
+    tile: &Tile,
+    binary: &Path,
+    launcher: Option<&Path>,
+    icon: Option<&Path>,
+) -> Shortcut {
     let exe = launcher.unwrap_or(binary);
 
     Shortcut {
@@ -77,7 +82,9 @@ pub fn shortcut(tile: &Tile, binary: &Path, launcher: Option<&Path>) -> Shortcut
             .to_string_lossy()
             .into_owned(),
         launch_options: tile.command.clone(),
-        icon: String::new(),
+        icon: icon
+            .map(|icon| icon.to_string_lossy().into_owned())
+            .unwrap_or_default(),
     }
 }
 
@@ -97,7 +104,8 @@ pub fn install(
     } else {
         None
     };
-    let shortcut = shortcut(tile, binary, launcher.as_deref());
+    let icon = tile::write_icon(paths)?;
+    let shortcut = shortcut(tile, binary, launcher.as_deref(), Some(&icon));
     let appid = shortcut.appid();
 
     warn_if_steam_is_running();
@@ -127,6 +135,7 @@ pub fn install(
         let before = existing.len();
         existing.upsert(&shortcut)?;
         shortcuts::save(user, &existing)?;
+        tile::write_artwork(&user.grid_dir(), appid)?;
 
         let verb = if existing.len() == before {
             "updated"
@@ -173,7 +182,7 @@ pub fn uninstall(
     // The launcher is not written here, only named: removing a tile should not
     // create the file it is about to stop pointing at.
     let launcher = tile.terminal.then(|| tile::launcher_path(paths));
-    let appid = shortcut(tile, binary, launcher.as_deref()).appid();
+    let appid = shortcut(tile, binary, launcher.as_deref(), None).appid();
 
     warn_if_steam_is_running();
 
@@ -281,7 +290,7 @@ mod tests {
     #[test]
     fn the_tile_points_at_the_launcher_and_carries_the_command() {
         let launcher = PathBuf::from("/data/steam/gamestore-tile.sh");
-        let shortcut = shortcut(&tile(), Path::new("/bin/gamestore"), Some(&launcher));
+        let shortcut = shortcut(&tile(), Path::new("/bin/gamestore"), Some(&launcher), None);
 
         assert_eq!(shortcut.exe, "/data/steam/gamestore-tile.sh");
         assert_eq!(shortcut.start_dir, "/bin");
@@ -290,7 +299,7 @@ mod tests {
 
     #[test]
     fn without_a_terminal_the_tile_points_straight_at_the_binary() {
-        let shortcut = shortcut(&tile(), Path::new("/bin/gamestore"), None);
+        let shortcut = shortcut(&tile(), Path::new("/bin/gamestore"), None, None);
 
         assert_eq!(shortcut.exe, "/bin/gamestore");
     }
@@ -298,8 +307,8 @@ mod tests {
     #[test]
     fn the_appid_follows_the_exe_so_the_two_variants_are_different_tiles() {
         let launcher = PathBuf::from("/data/steam/gamestore-tile.sh");
-        let wrapped = shortcut(&tile(), Path::new("/bin/gamestore"), Some(&launcher));
-        let bare = shortcut(&tile(), Path::new("/bin/gamestore"), None);
+        let wrapped = shortcut(&tile(), Path::new("/bin/gamestore"), Some(&launcher), None);
+        let bare = shortcut(&tile(), Path::new("/bin/gamestore"), None, None);
 
         assert_ne!(wrapped.appid(), bare.appid());
     }
