@@ -18,6 +18,7 @@ clap = { version = "4", features = ["derive"] }
 directories = "6"
 keyring = "4"
 percent-encoding = "2"
+qrcode = { version = "0.14", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"

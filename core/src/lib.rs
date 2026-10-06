@@ -9,6 +9,7 @@ pub mod auth;
 pub mod catalog;
 pub mod config;
 pub mod error;
+pub mod handoff;
 pub mod http;
 pub mod logging;
 pub mod platform;

@@ -7,8 +7,10 @@ use std::process::ExitCode;
 use std::time::SystemTime;
 
 use std::io::{BufRead, Write};
+use std::sync::mpsc;
 
 use clap::{Parser, Subcommand};
+use gamestore_core::handoff::{self, Handoff, Outcome};
 use gamestore_core::http::UreqClient;
 use gamestore_core::registry::{Registry, State};
 use gamestore_core::tokens::{self, Session, TokenStore};
@@ -32,8 +34,12 @@ enum Command {
     Info,
     /// Show the effective configuration and where it comes from.
     Config,
-    /// Log in to GOG: open the printed URL, then paste where you land.
-    Login,
+    /// Log in to GOG: scan the QR with a phone, or open the printed URL and paste where you land.
+    Login {
+        /// Only the terminal paste, without the QR and its LAN page.
+        #[arg(long)]
+        no_qr: bool,
+    },
     /// Forget the stored GOG session.
     Logout,
     /// List the GOG library, from the local cache unless asked to refresh.
@@ -184,12 +190,53 @@ fn run(cli: Cli) -> Result<()> {
                 Err(error) => println!("gog session:  unavailable ({error})"),
             }
         }
-        Command::Login => {
+        Command::Login { no_qr } => {
             let mut stored = open(&config, &paths)?;
+            let authorization_url = stored.session.credentials().authorization_url();
 
-            println!("Open this address and log in to GOG:");
+            // Read the terminal on its own thread, so a paste there and a
+            // submission from the phone can race and the first one wins.
+            let (sender, lines) = mpsc::channel();
+            std::thread::spawn(move || {
+                let mut stdin = std::io::stdin().lock();
+                loop {
+                    let mut line = String::new();
+                    match stdin.read_line(&mut line) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) if sender.send(line).is_err() => break,
+                        Ok(_) => {}
+                    }
+                }
+            });
+
+            let show_qr = config.login.qr && !no_qr;
+            let handoff = show_qr
+                .then(|| start_handoff(config.login.qr_port))
+                .flatten();
+
+            if show_qr {
+                // Two ways in from a phone: through the page this machine serves,
+                // or straight to GOG, typing the code it ends on back in here.
+                let mut panels = vec![];
+                if let Some(handoff) = &handoff {
+                    panels.push(("Phone, through this machine", handoff.url()));
+                }
+                panels.push(("GOG directly, then type the code here", &authorization_url));
+                print_qrs(&panels);
+            }
+            if let Some(handoff) = &handoff {
+                println!("Through this machine:  {}", handoff.url());
+                println!(
+                    "(if the phone cannot open it, the firewall has to allow TCP port {})",
+                    config.login.qr_port
+                );
+                println!();
+                println!("Or open this address and log in to GOG:");
+            } else {
+                println!("Open this address and log in to GOG:");
+            }
             println!();
-            println!("  {}", stored.session.credentials().authorization_url());
+            println!("  {authorization_url}");
             println!();
             println!("GOG then lands on a page whose address carries `code=...`.");
             print!("Paste that address (or just the code) here: ");
@@ -197,13 +244,21 @@ fn run(cli: Cli) -> Result<()> {
                 .flush()
                 .map_err(|error| gamestore_core::Error::io("writing to the terminal", error))?;
 
-            let mut pasted = String::new();
-            std::io::stdin()
-                .lock()
-                .read_line(&mut pasted)
-                .map_err(|error| gamestore_core::Error::io("reading from the terminal", error))?;
-
-            stored.session.log_in(&pasted)?;
+            match handoff {
+                Some(handoff) => {
+                    let outcome = handoff.serve(&authorization_url, &lines, |pasted| {
+                        stored.session.log_in(pasted)
+                    })?;
+                    match outcome {
+                        Outcome::Phone => println!("\nLogged in from the phone."),
+                        Outcome::Terminal(pasted) => stored.session.log_in(&pasted)?,
+                    }
+                }
+                None => {
+                    let pasted = lines.recv().unwrap_or_default();
+                    stored.session.log_in(&pasted)?;
+                }
+            }
             stored.report();
         }
         Command::Logout => {
@@ -369,6 +424,117 @@ fn run(cli: Cli) -> Result<()> {
 fn current_binary() -> Result<std::path::PathBuf> {
     std::env::current_exe()
         .map_err(|error| gamestore_core::Error::io("finding the gamestore binary", error))
+}
+
+/// Bind the phone handoff, or say why there is none and fall back to the paste.
+fn start_handoff(port: u16) -> Option<Handoff> {
+    let Some(ip) = handoff::lan_address() else {
+        println!("(no LAN address found, so no QR: paste in the terminal instead)");
+        return None;
+    };
+    match Handoff::bind(ip, port, handoff::DEFAULT_TTL) {
+        Ok(handoff) => Some(handoff),
+        Err(error) => {
+            println!("(no QR: {error})");
+            None
+        }
+    }
+}
+
+/// Draw each URL as a QR code under its label, side by side when the terminal is
+/// wide enough and stacked when it is not. Half-block characters put two modules
+/// on a line, and the colours are swapped for a dark terminal: the light modules
+/// are the ones drawn, so the code reads right on the dark background a TV
+/// terminal has.
+fn print_qrs(panels: &[(&str, &str)]) {
+    use qrcode::render::unicode::Dense1x2;
+
+    const GAP: usize = 4;
+
+    let rendered: Vec<(&str, Vec<String>)> = panels
+        .iter()
+        .filter_map(|(label, url)| {
+            let code = qrcode::QrCode::new(url.as_bytes()).ok()?;
+            let text = code
+                .render::<Dense1x2>()
+                .dark_color(Dense1x2::Light)
+                .light_color(Dense1x2::Dark)
+                .quiet_zone(true)
+                .build();
+            Some((*label, text.lines().map(str::to_string).collect()))
+        })
+        .collect();
+
+    let width = |lines: &[String]| lines.first().map_or(0, |line| line.chars().count());
+    let total: usize = rendered
+        .iter()
+        .map(|(label, lines)| width(lines).max(label.chars().count()) + GAP)
+        .sum();
+
+    if total > terminal_columns() {
+        for (label, lines) in &rendered {
+            println!("{label}");
+            for line in lines {
+                println!("{line}");
+            }
+            println!();
+        }
+        return;
+    }
+
+    let height = rendered
+        .iter()
+        .map(|(_, lines)| lines.len())
+        .max()
+        .unwrap_or(0);
+    let columns: Vec<usize> = rendered
+        .iter()
+        .map(|(label, lines)| width(lines).max(label.chars().count()) + GAP)
+        .collect();
+    let row = |cells: Vec<&str>| {
+        let line: String = cells
+            .iter()
+            .zip(&columns)
+            .map(|(cell, column)| format!("{cell}{}", " ".repeat(column - cell.chars().count())))
+            .collect();
+        println!("{}", line.trim_end());
+    };
+    row(rendered.iter().map(|(label, _)| *label).collect());
+    for index in 0..height {
+        row(rendered
+            .iter()
+            .map(|(_, lines)| lines.get(index).map_or("", String::as_str))
+            .collect());
+    }
+    println!();
+}
+
+/// The terminal width from `COLUMNS` or `stty`, assuming the 120 columns a
+/// maximised terminal on a TV has when neither says.
+fn terminal_columns() -> usize {
+    if let Some(columns) = std::env::var("COLUMNS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+    {
+        return columns;
+    }
+    std::fs::File::open("/dev/tty")
+        .ok()
+        .and_then(|tty| {
+            std::process::Command::new("stty")
+                .arg("size")
+                .stdin(tty)
+                .output()
+                .ok()
+        })
+        .and_then(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .split_whitespace()
+                .nth(1)?
+                .parse()
+                .ok()
+        })
+        .unwrap_or(120)
 }
 
 #[cfg(test)]

@@ -95,8 +95,10 @@ pub struct Config {
     /// Install games here instead of under the data directory.
     pub install_root: Option<PathBuf>,
     pub auth: Auth,
+    pub login: Login,
     pub download: Download,
     pub ludusavi: Ludusavi,
+    pub steamgriddb: SteamGridDb,
 }
 
 /// GOG OAuth2 client credentials. Which ones to ship is still open
@@ -121,6 +123,42 @@ impl std::fmt::Debug for Auth {
                 &self.client_secret.as_ref().map(|_| "<redacted>"),
             )
             .field("redirect_uri", &self.redirect_uri)
+            .finish()
+    }
+}
+
+/// How `gamestore login` hands the login to a phone (`crate::handoff`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Login {
+    /// Show a QR for finishing the login on a phone, next to the terminal paste.
+    pub qr: bool,
+    /// The LAN port the phone connects to; fixed so a firewall can allow it.
+    pub qr_port: u16,
+}
+
+impl Default for Login {
+    fn default() -> Self {
+        Self {
+            qr: true,
+            qr_port: crate::handoff::DEFAULT_PORT,
+        }
+    }
+}
+
+/// SteamGridDB, the artwork source for what GOG has no good covers for (`art2`).
+/// Its API key is free and per user, so there is no default.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SteamGridDb {
+    pub api_key: Option<String>,
+}
+
+/// Never print the key, not even through `{:?}`.
+impl std::fmt::Debug for SteamGridDb {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SteamGridDb")
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
             .finish()
     }
 }
@@ -211,11 +249,14 @@ impl Config {
         })
     }
 
-    /// Render the configuration as TOML with the client secret masked, for printing.
+    /// Render the configuration as TOML with the client secret and API key masked, for printing.
     pub fn to_toml_redacted(&self) -> Result<String> {
         let mut config = self.clone();
         if config.auth.client_secret.is_some() {
             config.auth.client_secret = Some("<redacted>".to_string());
+        }
+        if config.steamgriddb.api_key.is_some() {
+            config.steamgriddb.api_key = Some("<redacted>".to_string());
         }
         config.to_toml()
     }
@@ -271,9 +312,16 @@ mod tests {
                 client_secret: Some("a-secret".to_string()),
                 redirect_uri: None,
             },
+            login: Login {
+                qr: false,
+                qr_port: 9000,
+            },
             download: Download { concurrency: 8 },
             ludusavi: Ludusavi {
                 binary: PathBuf::from("/usr/bin/ludusavi"),
+            },
+            steamgriddb: SteamGridDb {
+                api_key: Some("a-key".to_string()),
             },
         };
 
@@ -342,6 +390,16 @@ mod tests {
         assert!(printed.contains("<redacted>"), "{printed}");
         assert!(!format!("{config:?}").contains("a-secret"));
         assert!(config.to_toml().unwrap().contains("a-secret"));
+
+        let config = Config {
+            steamgriddb: SteamGridDb {
+                api_key: Some("a-key".to_string()),
+            },
+            ..Config::default()
+        };
+        assert!(!config.to_toml_redacted().unwrap().contains("a-key"));
+        assert!(!format!("{config:?}").contains("a-key"));
+        assert!(config.to_toml().unwrap().contains("a-key"));
     }
 
     #[test]
