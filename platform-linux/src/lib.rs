@@ -2,6 +2,8 @@
 //! and later the `CompatToolMapping` writer and the generated launch wrappers.
 
 pub mod inno;
+pub mod install;
+pub mod pending;
 pub mod proton;
 pub mod shortcuts;
 pub mod tile;

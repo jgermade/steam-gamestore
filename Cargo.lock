@@ -611,6 +611,7 @@ name = "gamestore-cli"
 version = "0.0.1"
 dependencies = [
  "clap",
+ "directories",
  "gamestore-core",
  "gamestore-platform-linux",
  "gamestore-platform-windows",
@@ -642,6 +643,8 @@ version = "0.0.1"
 dependencies = [
  "directories",
  "gamestore-core",
+ "serde",
+ "serde_json",
  "tempfile",
 ]
 

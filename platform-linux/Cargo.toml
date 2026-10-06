@@ -10,6 +10,8 @@ repository.workspace = true
 [dependencies]
 directories.workspace = true
 gamestore-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -74,6 +74,16 @@ enum Command {
         #[arg(long)]
         no_art: bool,
     },
+    /// Add games installed while Steam was running; Steam must be closed.
+    #[cfg(target_os = "linux")]
+    SteamApply,
+    /// Have games installed while Steam ran added automatically before it starts.
+    #[cfg(target_os = "linux")]
+    SteamHook {
+        /// Remove the hook instead.
+        #[arg(long)]
+        remove: bool,
+    },
     /// Add gamestore to Steam as a non-Steam tile, to test it from Big Picture.
     #[cfg(target_os = "linux")]
     SteamInstall {
@@ -410,6 +420,31 @@ fn run(cli: Cli) -> Result<()> {
                     no_art,
                 },
             )?;
+        }
+        #[cfg(target_os = "linux")]
+        Command::SteamApply => {
+            let written =
+                gamestore_platform_linux::pending::apply(&paths, &platform.steam_root()?)?;
+            if written.is_empty() {
+                println!("Nothing was waiting to be added to Steam.");
+            }
+            for title in written {
+                println!("added to Steam: {title}");
+            }
+        }
+        #[cfg(target_os = "linux")]
+        Command::SteamHook { remove } => {
+            let config_home = directories::BaseDirs::new()
+                .map(|dirs| dirs.config_dir().to_path_buf())
+                .ok_or(gamestore_core::Error::MissingDirectory("config"))?;
+            let path =
+                gamestore_platform_linux::pending::hook(&config_home, &current_binary()?, remove)?;
+            if remove {
+                println!("removed {}", path.display());
+            } else {
+                println!("installed {}", path.display());
+                println!("Games installed while Steam runs are now added the next time it starts.");
+            }
         }
         Command::SteamInstall {
             name,
