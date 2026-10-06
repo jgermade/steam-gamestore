@@ -14,6 +14,7 @@
 
 use std::path::{Path, PathBuf};
 
+use gamestore_core::atomic::{self, Access};
 use gamestore_core::text_vdf::{self, Node};
 use gamestore_core::{Error, Result};
 
@@ -217,6 +218,83 @@ pub fn choose(steam_root: &Path, configured: Option<&str>) -> Result<ProtonTool>
         .ok_or_else(|| Error::Steam(format!("no Proton to install with; {}", listed())))
 }
 
+/// The priority Steam gives a tool a user picked for one game, above the "0"
+/// default's 75: what "Force the use of a specific compatibility tool" writes.
+const PER_GAME_PRIORITY: &str = "250";
+
+/// Suffix of the untouched copy of `config.vdf` kept before the first change.
+pub const BACKUP_SUFFIX: &str = ".gamestore-backup";
+
+/// The `compat` task: make Steam run shortcut `appid` with `tool`.
+///
+/// Steam owns `config.vdf` while it runs and writes it back on exit, so this is
+/// only worth doing with Steam stopped; the caller checks. The file is copied
+/// aside once, before gamestore first changes it, and written atomically.
+pub fn map(steam_root: &Path, appid: u32, tool: &str) -> Result<()> {
+    edit_mapping(steam_root, |mapping| {
+        mapping.set(
+            &appid.to_string(),
+            Node::Map(vec![
+                ("name".to_string(), Node::value(tool)),
+                ("config".to_string(), Node::value("")),
+                ("priority".to_string(), Node::value(PER_GAME_PRIORITY)),
+            ]),
+        );
+        true
+    })
+    .map(|_| ())
+}
+
+/// Remove the mapping of shortcut `appid`. Returns whether there was one.
+pub fn unmap(steam_root: &Path, appid: u32) -> Result<bool> {
+    edit_mapping(steam_root, |mapping| {
+        let key = appid.to_string();
+        let entries = mapping.entries_mut().expect("the mapping is a block");
+        let before = entries.len();
+        entries.retain(|(name, _)| name != &key);
+        entries.len() != before
+    })
+}
+
+fn edit_mapping(steam_root: &Path, change: impl FnOnce(&mut Node) -> bool) -> Result<bool> {
+    let path = config_vdf(steam_root);
+    let text = std::fs::read_to_string(&path)
+        .map_err(|error| Error::io(format!("reading {}", path.display()), error))?;
+    let mut document = text_vdf::parse(&text)
+        .map_err(|error| Error::Vdf(format!("{} could not be read: {error}", path.display())))?;
+
+    // Create the path down to the mapping block if Steam has not yet.
+    let mut node = &mut document;
+    for key in MAPPING_PATH {
+        if node.get(key).is_none() {
+            node.set(key, Node::Map(Vec::new()));
+        }
+        node = node.get_mut(key).expect("just ensured");
+        if node.entries().is_none() {
+            return Err(Error::Vdf(format!(
+                "{}: {key} is a value where a block was expected",
+                path.display()
+            )));
+        }
+    }
+
+    if !change(node) {
+        return Ok(false);
+    }
+
+    let backup = path.with_file_name(format!("config.vdf{BACKUP_SUFFIX}"));
+    if !backup.exists() {
+        std::fs::copy(&path, &backup)
+            .map_err(|error| Error::io(format!("backing up {}", path.display()), error))?;
+    }
+    atomic::write(
+        &path,
+        text_vdf::write(&document).as_bytes(),
+        Access::Default,
+    )?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,6 +383,70 @@ mod tests {
         let tool = choose(root.path(), Some("GE-Proton10-1")).unwrap();
 
         assert_eq!(tool.dir, dir.join("."));
+    }
+
+    #[test]
+    fn mapping_a_shortcut_adds_one_block_and_touches_nothing_else() {
+        let root = tempfile::tempdir().unwrap();
+        write_default(root.path(), "proton_11");
+        let before = std::fs::read_to_string(config_vdf(root.path())).unwrap();
+
+        map(root.path(), 2907567421, "proton_11").unwrap();
+
+        let after = std::fs::read_to_string(config_vdf(root.path())).unwrap();
+        let document = text_vdf::parse(&after).unwrap();
+        let entry = document
+            .path(&MAPPING_PATH)
+            .unwrap()
+            .get("2907567421")
+            .unwrap();
+        assert_eq!(entry.get("name").unwrap().as_str().unwrap(), "proton_11");
+        assert_eq!(entry.get("priority").unwrap().as_str().unwrap(), "250");
+        assert_eq!(default_name(root.path()).as_deref(), Some("proton_11"));
+
+        // Undoing it gives back the file as it was.
+        assert!(unmap(root.path(), 2907567421).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(config_vdf(root.path())).unwrap(),
+            before
+        );
+        assert!(!unmap(root.path(), 2907567421).unwrap());
+
+        let backup = root.path().join("config/config.vdf.gamestore-backup");
+        assert_eq!(std::fs::read_to_string(backup).unwrap(), before);
+    }
+
+    #[test]
+    fn mapping_twice_replaces_rather_than_duplicates() {
+        let root = tempfile::tempdir().unwrap();
+        write_default(root.path(), "proton_11");
+
+        map(root.path(), 7, "proton_11").unwrap();
+        map(root.path(), 7, "proton_experimental").unwrap();
+
+        let text = std::fs::read_to_string(config_vdf(root.path())).unwrap();
+        assert_eq!(text.matches("\"7\"").count(), 1, "{text}");
+        assert!(text.contains("proton_experimental"));
+    }
+
+    #[test]
+    fn a_config_without_any_mapping_gets_the_block_created() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("config")).unwrap();
+        std::fs::write(
+            config_vdf(root.path()),
+            "\"InstallConfigStore\"\n{\n\t\"Software\"\n\t{\n\t}\n}\n",
+        )
+        .unwrap();
+
+        map(root.path(), 7, "proton_11").unwrap();
+
+        let text = std::fs::read_to_string(config_vdf(root.path())).unwrap();
+        let document = text_vdf::parse(&text).unwrap();
+        assert!(
+            document.path(&MAPPING_PATH).unwrap().get("7").is_some(),
+            "{text}"
+        );
     }
 
     #[test]

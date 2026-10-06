@@ -58,6 +58,9 @@ or set GOG_CLIENT_ID and GOG_CLIENT_SECRET"
     #[error("install failed: {0}")]
     Install(String),
 
+    #[error("artwork: {0}")]
+    Artwork(String),
+
     #[error("not logged in to GOG; run `gamestore login`")]
     NotLoggedIn,
 

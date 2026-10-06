@@ -4,6 +4,7 @@
 //! behind a trait, the GOG OAuth2 flow, and the [`Platform`] trait that the
 //! `platform-*` crates implement. The catalog and the downloader land here too.
 
+pub mod artwork;
 pub mod atomic;
 pub mod auth;
 pub mod catalog;
