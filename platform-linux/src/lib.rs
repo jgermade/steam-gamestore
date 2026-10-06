@@ -1,6 +1,8 @@
 //! Linux side of gamestore: the Steam installation, the `shortcuts.vdf` writer,
 //! and later the `CompatToolMapping` writer and the generated launch wrappers.
 
+pub mod inno;
+pub mod proton;
 pub mod shortcuts;
 pub mod tile;
 

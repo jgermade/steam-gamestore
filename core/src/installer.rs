@@ -524,6 +524,95 @@ impl<W: Write> Write for Verifier<'_, W> {
     }
 }
 
+/// How the installed game is started, from the `goggame-<id>.info` GOG's
+/// installers leave in the install directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlayTask {
+    /// The executable, inside the install directory.
+    pub exe: PathBuf,
+    /// Arguments GOG passes it, often none.
+    pub arguments: String,
+    /// Where it expects to start; the install directory when GOG says nothing.
+    pub working_dir: PathBuf,
+}
+
+#[derive(Deserialize)]
+struct GameInfo {
+    #[serde(default, rename = "playTasks")]
+    play_tasks: Vec<RawPlayTask>,
+}
+
+#[derive(Deserialize)]
+struct RawPlayTask {
+    #[serde(default, rename = "isPrimary")]
+    is_primary: bool,
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default, rename = "type")]
+    kind: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
+    #[serde(default, rename = "workingDir")]
+    working_dir: Option<String>,
+}
+
+/// The primary play task of the game installed in `install_dir`.
+///
+/// The file is named after the product id, but a game can carry the info of its
+/// root product instead, so any `goggame-*.info` is accepted when the exact one is
+/// not there. Paths in it use Windows separators.
+pub fn primary_task(install_dir: &Path, id: &ProductId) -> Result<PlayTask> {
+    let exact = install_dir.join(format!("goggame-{id}.info"));
+    let info = if exact.is_file() {
+        exact
+    } else {
+        std::fs::read_dir(install_dir)
+            .map_err(|error| Error::io(format!("reading {}", install_dir.display()), error))?
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("goggame-") && name.ends_with(".info"))
+            })
+            .ok_or_else(|| {
+                Error::Install(format!(
+                    "no goggame-*.info in {}, so the game's executable is unknown",
+                    install_dir.display()
+                ))
+            })?
+    };
+
+    let text = std::fs::read_to_string(&info)
+        .map_err(|error| Error::io(format!("reading {}", info.display()), error))?;
+    let parsed: GameInfo = serde_json::from_str(&text).map_err(|error| {
+        Error::Install(format!("{} could not be read ({error})", info.display()))
+    })?;
+
+    let task = parsed
+        .play_tasks
+        .into_iter()
+        .filter(|task| {
+            task.kind.as_deref().unwrap_or("FileTask") == "FileTask" && task.path.is_some()
+        })
+        .filter(|task| task.category.as_deref().unwrap_or("game") == "game")
+        .max_by_key(|task| task.is_primary)
+        .ok_or_else(|| Error::Install(format!("{} names no executable to play", info.display())))?;
+
+    let local = |windows: &str| install_dir.join(windows.replace('\\', "/"));
+    Ok(PlayTask {
+        exe: local(task.path.as_deref().unwrap_or_default()),
+        arguments: task.arguments.unwrap_or_default(),
+        working_dir: task
+            .working_dir
+            .filter(|dir| !dir.is_empty())
+            .map(|dir| local(&dir))
+            .unwrap_or_else(|| install_dir.to_path_buf()),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -778,6 +867,45 @@ mod tests {
         assert!(error.to_string().contains("bytes 8..=11"), "{error}");
         let kept = std::fs::read(temp.path().join("setup.exe.part")).unwrap();
         assert_eq!(kept.len(), 8, "nothing past the last good chunk is kept");
+    }
+
+    /// The real `goggame-1955095293.info` Xeno Crisis's installer wrote.
+    const XENO_CRISIS_INFO: &str = r#"{"buildId":"53063895835721891","clientId":"52046146912113724","gameId":"1955095293","language":"English","languages":["en-US"],"name":"Xeno Crisis","osBitness":["64"],"playTasks":[{"category":"game","isPrimary":true,"languages":["en-US"],"name":"Xeno Crisis","path":"Xeno Crisis.exe","type":"FileTask"}],"rootGameId":"1955095293","version":1}"#;
+
+    #[test]
+    fn the_primary_task_of_the_real_info_file_is_found() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("goggame-1955095293.info"),
+            XENO_CRISIS_INFO,
+        )
+        .unwrap();
+
+        let task = primary_task(temp.path(), &"1955095293".into()).unwrap();
+
+        assert_eq!(task.exe, temp.path().join("Xeno Crisis.exe"));
+        assert_eq!(task.working_dir, temp.path());
+        assert_eq!(task.arguments, "");
+    }
+
+    #[test]
+    fn links_and_secondary_tasks_lose_to_the_primary_game_exe() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("goggame-1.info"),
+            r#"{"playTasks":[
+                {"category":"document","path":"manual.pdf","type":"FileTask"},
+                {"category":"game","path":"bin\\launcher.exe","type":"FileTask"},
+                {"category":"game","isPrimary":true,"path":"bin\\game.exe","arguments":"-dx11","workingDir":"bin","type":"FileTask"},
+                {"category":"tool","link":"https://example.com","type":"URLTask"}]}"#,
+        )
+        .unwrap();
+
+        let task = primary_task(temp.path(), &"1".into()).unwrap();
+
+        assert_eq!(task.exe, temp.path().join("bin/game.exe"));
+        assert_eq!(task.arguments, "-dx11");
+        assert_eq!(task.working_dir, temp.path().join("bin"));
     }
 
     #[test]

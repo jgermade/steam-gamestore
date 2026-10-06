@@ -17,6 +17,7 @@ pub mod platform;
 pub mod registry;
 pub mod shortcuts;
 pub mod steam;
+pub mod text_vdf;
 pub mod tokens;
 pub mod vdf;
 
