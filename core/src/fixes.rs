@@ -39,6 +39,10 @@ struct Fix {
     arguments: Arguments,
     /// Start it through [`DEPTH16`].
     depth16: bool,
+    /// Wine DLL overrides, for games that ship their own replacement of a
+    /// system DLL: Windows loads one from the game's directory first, Wine its
+    /// own builtin unless told otherwise.
+    dll_overrides: &'static str,
 }
 
 /// The 16-bit colour launcher, built by `assets/windows/build.sh`.
@@ -55,6 +59,10 @@ const FIXES: &[Fix] = &[
     // `-fullscreen`; its own help text lists the switches. And it switches the
     // display to 16-bit colour first: game.EXE checks the desktop's depth on start
     // and stops at "16 bit screen mode required" otherwise, fullscreen or not.
+    // Its music is CD audio, and GOG ships the tracks as 02.wav–13.wav with a
+    // winmm.dll that emulates the CD drive by playing them. Wine prefers its
+    // builtin winmm, the game then fails to open the CD ("cdaudio" on "c:") and
+    // crashes in its error path, so the shipped one is preferred.
     // Found on the mini PC, 2026-10-06.
     Fix {
         id: "1207658895",
@@ -65,11 +73,15 @@ const FIXES: &[Fix] = &[
             key: "Params",
         },
         depth16: true,
+        dll_overrides: "winmm=n,b",
     },
 ];
 
 /// `task` corrected for `id`, when there is a known fix and the files it expects
 /// are there; otherwise `task` unchanged.
+///
+/// A fix that needs environment variables returns Steam launch options of the form
+/// `NAME=value %command% arguments`, which Steam expands around the exe it runs.
 pub fn apply(id: &ProductId, install_dir: &Path, task: PlayTask) -> PlayTask {
     let Some(fix) = FIXES.iter().find(|fix| fix.id == id.as_str()) else {
         return task;
@@ -85,6 +97,18 @@ pub fn apply(id: &ProductId, install_dir: &Path, task: PlayTask) -> PlayTask {
         }
     };
     let working_dir = install_dir.to_path_buf();
+    let with_environment = |arguments: String| {
+        if fix.dll_overrides.is_empty() {
+            arguments
+        } else {
+            format!(
+                "WINEDLLOVERRIDES=\"{}\" %command% {arguments}",
+                fix.dll_overrides
+            )
+            .trim()
+            .to_string()
+        }
+    };
     if fix.depth16 {
         let launcher = install_dir.join(DEPTH16_NAME);
         let current = std::fs::read(&launcher).ok();
@@ -95,14 +119,14 @@ pub fn apply(id: &ProductId, install_dir: &Path, task: PlayTask) -> PlayTask {
                 .unwrap_or_default();
             return PlayTask {
                 exe: launcher,
-                arguments: format!("\"{name}\" {arguments}").trim().to_string(),
+                arguments: with_environment(format!("\"{name}\" {arguments}").trim().to_string()),
                 working_dir,
             };
         }
     }
     PlayTask {
         exe,
-        arguments,
+        arguments: with_environment(arguments),
         working_dir,
     }
 }
@@ -144,7 +168,8 @@ mod tests {
         assert_eq!(fixed.exe, temp.path().join(DEPTH16_NAME));
         assert_eq!(
             fixed.arguments,
-            "\"game.EXE\" -fullscreen -D3D -ZBuffer -DoRealLock -NoDither -FrameRateMax60"
+            "WINEDLLOVERRIDES=\"winmm=n,b\" %command% \"game.EXE\" -fullscreen -D3D -ZBuffer \
+             -DoRealLock -NoDither -FrameRateMax60"
         );
         assert_eq!(std::fs::read(&fixed.exe).unwrap(), DEPTH16);
     }
