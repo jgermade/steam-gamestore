@@ -121,6 +121,15 @@ pub fn write(steam_root: &Path, tile: &PendingTile) -> Result<()> {
             }
         }
         proton::unmap(steam_root, old)?;
+        // The prefix goes with the game: its saves and registry live there.
+        let compatdata = steam_root.join("steamapps/compatdata");
+        let (from, to) = (
+            compatdata.join(old.to_string()),
+            compatdata.join(shortcut.appid().to_string()),
+        );
+        if from.is_dir() && !to.exists() {
+            let _ = std::fs::rename(&from, &to);
+        }
     }
     for id in &tile.users {
         let Some(user) = users.iter().find(|user| user.id == *id) else {
@@ -341,6 +350,25 @@ mod tests {
         assert!(!config.contains(&old.appid().to_string()), "{config}");
         assert!(config.contains(&new.appid().to_string()), "{config}");
         assert!(!grid.join(format!("{}p.png", old.appid())).exists());
+    }
+
+    #[test]
+    fn the_prefix_follows_a_replaced_tile() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = steam_root(temp.path());
+        let old = tile("1");
+        write(&root, &old).unwrap();
+        let saves = root.join(format!("steamapps/compatdata/{}/pfx/save.dat", old.appid()));
+        std::fs::create_dir_all(saves.parent().unwrap()).unwrap();
+        std::fs::write(&saves, "progress").unwrap();
+
+        let mut new = tile("1");
+        new.exe = "/games/1/real.exe".to_string();
+        new.replaces = Some(old.appid());
+        write(&root, &new).unwrap();
+
+        let moved = root.join(format!("steamapps/compatdata/{}/pfx/save.dat", new.appid()));
+        assert_eq!(std::fs::read_to_string(moved).unwrap(), "progress");
     }
 
     #[test]

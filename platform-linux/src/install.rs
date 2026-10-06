@@ -292,6 +292,7 @@ fn run(
     );
     registry.save(paths)?;
     let target = target_dir(context, game, request.os);
+    let mut installed_prefix = None;
     let task = match tool {
         None => match native::play_task(&target) {
             Some(task) => {
@@ -340,12 +341,10 @@ fn run(
                         log: &install_log(paths, game),
                         timeout: INSTALL_TIMEOUT,
                     })?;
-                    if let Some(left) = inno::discard_prefix(&prefix) {
-                        warnings.push(format!(
-                            "could not remove the install prefix {}",
-                            left.display()
-                        ));
-                    }
+                    // The prefix is kept: what the installer wrote into it, its
+                    // registry above all, is what the game expects to find. It
+                    // becomes the game's Steam prefix once the appid is known.
+                    installed_prefix = Some(prefix);
                     installer::primary_task(&target, &game.id)?
                 }
             };
@@ -374,6 +373,11 @@ fn run(
         },
     };
     let appid = shortcut.appid();
+    if let Some(prefix) = installed_prefix
+        && let Some(problem) = adopt_prefix(context.steam_root, &prefix, appid)
+    {
+        warnings.push(problem);
+    }
 
     // 4. Artwork. Steam reads it whether it is running or not, and a game without
     //    art is still a game, so a failure here is a warning.
@@ -485,6 +489,55 @@ fn ensure_hook() -> Result<()> {
         pending::hook(&config_home, &binary, false)?;
     }
     Ok(())
+}
+
+/// Make the prefix a game was installed with its Steam prefix, `compatdata/<appid>`,
+/// so the registry entries and anything else its installer put there are where
+/// the game runs. Steam adopts a prefix made by the same Proton as its own. When
+/// the game already has one (it has been played) that one is kept, since it may
+/// hold saves, and the install prefix is discarded. Returns what went wrong, if
+/// anything did.
+pub fn adopt_prefix(steam_root: &Path, prefix: &Path, appid: u32) -> Option<String> {
+    let compatdata = steam_root.join("steamapps/compatdata");
+    let destination = compatdata.join(gamestore_core::steam::compatdata_name(appid));
+    if destination.exists() {
+        let _ = inno::discard_prefix(prefix);
+        return Some(format!(
+            "the game already has a Proton prefix ({}), which is kept; what its installer \
+             wrote into the registry was not carried over",
+            destination.display()
+        ));
+    }
+    let moved = std::fs::create_dir_all(&compatdata)
+        .and_then(|()| std::fs::rename(prefix, &destination))
+        .or_else(|error| {
+            // A Steam library on another filesystem than the cache: copy, keeping
+            // the prefix's symlinks (dosdevices) as they are, then remove.
+            if error.kind() != std::io::ErrorKind::CrossesDevices {
+                return Err(error);
+            }
+            let copied = Command::new("cp")
+                .arg("-a")
+                .arg(prefix)
+                .arg(&destination)
+                .status()?;
+            if !copied.success() {
+                let _ = std::fs::remove_dir_all(&destination);
+                return Err(std::io::Error::other("cp -a failed"));
+            }
+            let _ = std::fs::remove_dir_all(prefix);
+            Ok(())
+        });
+    match moved {
+        Ok(()) => None,
+        Err(error) => {
+            let _ = inno::discard_prefix(prefix);
+            Some(format!(
+                "the install prefix could not become the game's prefix ({error}); what its \
+                 installer wrote into the registry was not carried over"
+            ))
+        }
+    }
 }
 
 /// Where the installer's log for `game` goes.
