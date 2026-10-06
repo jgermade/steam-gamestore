@@ -43,6 +43,65 @@ struct Fix {
     /// system DLL: Windows loads one from the game's directory first, Wine its
     /// own builtin unless told otherwise.
     dll_overrides: &'static str,
+    /// Render through dgVoodoo2, with these settings.
+    dgvoodoo: Option<DgVoodoo>,
+}
+
+/// dgVoodoo2 for a game: its DirectDraw and Direct3D (up to 7) translated to
+/// Direct3D 11, which Proton turns into Vulkan. It renders old 3D at a forced
+/// resolution with modern antialiasing and filtering. The settings are
+/// `(section, key, value)` lines set in the configuration file dgVoodoo ships,
+/// and the game's DLL overrides have to include `ddraw` and `d3dimm`.
+#[derive(Debug, Clone, Copy)]
+pub struct DgVoodoo {
+    pub settings: &'static [(&'static str, &'static str, &'static str)],
+}
+
+/// dgVoodoo's 32-bit DirectDraw and Direct3D 1–7 DLLs, as its release lays them
+/// out, to be copied next to the game.
+pub const DGVOODOO_FILES: &[&str] = &["MS/x86/DDraw.dll", "MS/x86/D3DImm.dll"];
+
+/// The game's dgVoodoo settings, when its fix uses dgVoodoo.
+pub fn dgvoodoo(id: &ProductId) -> Option<DgVoodoo> {
+    FIXES
+        .iter()
+        .find(|fix| fix.id == id.as_str())
+        .and_then(|fix| fix.dgvoodoo)
+}
+
+/// dgVoodoo's own configuration file with `settings` applied. Lines keep their
+/// layout; a key that is not in its section is an error, so a dgVoodoo release
+/// that renames a setting fails loudly instead of being ignored.
+pub fn configure_dgvoodoo(
+    template: &str,
+    settings: &[(&str, &str, &str)],
+) -> Result<String, String> {
+    let mut lines: Vec<String> = template.lines().map(str::to_string).collect();
+    for (section, key, value) in settings {
+        let header = format!("[{section}]");
+        let start = lines
+            .iter()
+            .position(|line| line.trim() == header)
+            .ok_or_else(|| format!("dgVoodoo.conf has no {header} section"))?;
+        let end = lines[start + 1..]
+            .iter()
+            .position(|line| line.trim_start().starts_with('['))
+            .map_or(lines.len(), |offset| start + 1 + offset);
+        let line = lines[start + 1..end]
+            .iter_mut()
+            .find(|line| {
+                !line.trim_start().starts_with(';')
+                    && line
+                        .split_once('=')
+                        .is_some_and(|(name, _)| name.trim().eq_ignore_ascii_case(key))
+            })
+            .ok_or_else(|| format!("dgVoodoo.conf has no {key} in {header}"))?;
+        let (name, _) = line.split_once('=').expect("matched on '='");
+        *line = format!("{name}= {value}");
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    Ok(out)
 }
 
 /// The 16-bit colour launcher, built by `assets/windows/build.sh`.
@@ -63,7 +122,11 @@ const FIXES: &[Fix] = &[
     // winmm.dll that emulates the CD drive by playing them. Wine prefers its
     // builtin winmm, the game then fails to open the CD ("cdaudio" on "c:") and
     // crashes in its error path, so the shipped one is preferred.
-    // Found on the mini PC, 2026-10-06.
+    // It renders at 640×480 and nothing makes it render wider. Through dgVoodoo the
+    // 3D is drawn at the screen's height (1440×1080 on a 1080p TV) with 4×
+    // antialiasing and 16× anisotropic filtering, 4:3 centred. Its in-game 16:9
+    // mode fails with dgVoodoo ("16 bit screen mode required", cause unknown), so
+    // it is not used. Found on the mini PC, 2026-10-06.
     Fix {
         id: "1207658895",
         exe: "game.EXE",
@@ -73,7 +136,17 @@ const FIXES: &[Fix] = &[
             key: "Params",
         },
         depth16: true,
-        dll_overrides: "winmm=n,b",
+        dll_overrides: "winmm=n,b;ddraw=n,b;d3dimm=n,b",
+        dgvoodoo: Some(DgVoodoo {
+            settings: &[
+                ("General", "ScalingMode", "centered_ar"),
+                ("DirectX", "Resolution", "max"),
+                ("DirectX", "Antialiasing", "4x"),
+                ("DirectX", "Filtering", "16"),
+                ("DirectX", "ForceVerticalSync", "true"),
+                ("DirectX", "dgVoodooWatermark", "false"),
+            ],
+        }),
     },
 ];
 
@@ -168,10 +241,31 @@ mod tests {
         assert_eq!(fixed.exe, temp.path().join(DEPTH16_NAME));
         assert_eq!(
             fixed.arguments,
-            "WINEDLLOVERRIDES=\"winmm=n,b\" %command% \"game.EXE\" -fullscreen -D3D -ZBuffer \
+            "WINEDLLOVERRIDES=\"winmm=n,b;ddraw=n,b;d3dimm=n,b\" %command% \"game.EXE\" -fullscreen -D3D -ZBuffer \
              -DoRealLock -NoDither -FrameRateMax60"
         );
         assert_eq!(std::fs::read(&fixed.exe).unwrap(), DEPTH16);
+    }
+
+    #[test]
+    fn dgvoodoo_settings_change_only_their_own_section() {
+        let template = "[General]\r\nScalingMode = unspecified\r\n\r\n[Glide]\r\nResolution = unforced\r\n\r\n[DirectX]\r\n; Resolution: comment\r\nResolution    = unforced\r\n";
+
+        let configured = configure_dgvoodoo(
+            template,
+            &[
+                ("DirectX", "Resolution", "max"),
+                ("General", "ScalingMode", "centered_ar"),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            configured,
+            "[General]\nScalingMode = centered_ar\n\n[Glide]\nResolution = unforced\n\n[DirectX]\n; Resolution: comment\nResolution    = max\n"
+        );
+        assert!(configure_dgvoodoo(template, &[("DirectX", "Missing", "1")]).is_err());
+        assert!(dgvoodoo(&"1207658895".into()).is_some());
     }
 
     #[test]

@@ -350,6 +350,9 @@ fn run(
                 }
             };
             // The per-game fixes are for Windows builds and their launchers.
+            if let Some(settings) = gamestore_core::fixes::dgvoodoo(&game.id) {
+                crate::tools::install_dgvoodoo(paths, &target, &settings)?;
+            }
             gamestore_core::fixes::apply(&game.id, &target, task)
         }
     };

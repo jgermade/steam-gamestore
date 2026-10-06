@@ -8,6 +8,7 @@ pub mod pending;
 pub mod proton;
 pub mod shortcuts;
 pub mod tile;
+pub mod tools;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
