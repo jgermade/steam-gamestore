@@ -7,15 +7,23 @@ use std::io::Write;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use gamestore_core::catalog::{Catalog, Game, ProductId};
+use gamestore_core::catalog::{Catalog, Game, Os, ProductId};
 use gamestore_core::{Config, Error, Paths, Result, steam};
 use gamestore_platform_linux::install::{self, Context, Event, Request, SteamPolicy};
 use gamestore_platform_linux::shortcuts;
+
+/// A build to install, as the command line names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Platform {
+    Linux,
+    Windows,
+}
 
 /// What `gamestore install` was asked for.
 #[derive(Debug, Clone)]
 pub struct Options {
     pub query: String,
+    pub platform: Option<Platform>,
     pub language: String,
     pub user: Option<u32>,
     pub all_users: bool,
@@ -77,8 +85,19 @@ pub fn run(
         steam_root,
         access_token,
     };
+    let os = match options.platform {
+        Some(Platform::Linux) => Os::Linux,
+        Some(Platform::Windows) => Os::Windows,
+        None => install::preferred(game).ok_or_else(|| {
+            Error::Install(format!(
+                "{} has neither a Linux nor a Windows build on GOG",
+                game.title
+            ))
+        })?,
+    };
     let request = Request {
         game,
+        os,
         users: &users,
         language: &options.language,
         artwork: !options.no_art,
@@ -91,7 +110,14 @@ pub fn run(
 
     let tool = install::preflight(&context, &request)?;
     println!("{}  ({})", game.title, game.id);
-    println!("proton:   {} ({})", tool.name, tool.dir.display());
+    match &tool {
+        Some(tool) => println!(
+            "build:    Windows, under {} ({})",
+            tool.name,
+            tool.dir.display()
+        ),
+        None => println!("build:    native {}", install::os_label(os)),
+    }
 
     let mut printer = Printer::default();
     let outcome = install::install(&context, &request, &mut |event| printer.show(event));
@@ -120,7 +146,7 @@ pub fn run(
         );
     } else {
         println!(
-            "{} is in the library{}. Steam will make its Proton prefix at the first launch,",
+            "{} is in the library{}.",
             game.title,
             if outcome.restarted {
                 ""
@@ -128,11 +154,13 @@ pub fn run(
                 " once Steam starts"
             }
         );
-        println!(
-            "in {}/steamapps/compatdata/{}.",
-            steam_root.display(),
-            steam::compatdata_name(outcome.appid)
-        );
+        if tool.is_some() {
+            println!(
+                "Steam will make its Proton prefix at the first launch, in {}/steamapps/compatdata/{}.",
+                steam_root.display(),
+                steam::compatdata_name(outcome.appid)
+            );
+        }
     }
     Ok(())
 }

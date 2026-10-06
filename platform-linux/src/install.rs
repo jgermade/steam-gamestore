@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime};
 
-use gamestore_core::catalog::Game;
+use gamestore_core::catalog::{Game, Os};
 use gamestore_core::http::{DownloadClient, UreqClient};
 use gamestore_core::installer::{self, Checksum};
 use gamestore_core::registry::{Registry, State};
@@ -27,7 +27,7 @@ use gamestore_core::{Config, Error, Paths, Result, artwork};
 use crate::pending::{self, PendingTile};
 use crate::proton::{self, ProtonTool};
 use crate::shortcuts::SteamUser;
-use crate::{inno, tile};
+use crate::{inno, native, tile};
 
 /// How long an installer may run before it is taken to be stuck.
 pub const INSTALL_TIMEOUT: Duration = Duration::from_secs(60 * 60);
@@ -75,6 +75,8 @@ pub struct Outcome {
     pub target: PathBuf,
     /// The installer's version, as GOG names it.
     pub version: String,
+    /// Which build was installed.
+    pub os: Os,
     /// The Steam writes are queued, waiting for Steam to restart.
     pub pending: bool,
     /// Steam was stopped and started again.
@@ -97,6 +99,8 @@ pub struct Context<'a> {
 #[derive(Debug, Clone)]
 pub struct Request<'a> {
     pub game: &'a Game,
+    /// Which build: the native Linux one, or the Windows one under Proton.
+    pub os: Os,
     pub users: &'a [SteamUser],
     pub language: &'a str,
     pub artwork: bool,
@@ -125,11 +129,12 @@ pub fn install_dir_name(title: &str) -> String {
 }
 
 /// Check what can be checked before anything is downloaded.
-pub fn preflight(context: &Context, request: &Request) -> Result<ProtonTool> {
-    if !request.game.has_windows_build() {
+pub fn preflight(context: &Context, request: &Request) -> Result<Option<ProtonTool>> {
+    if !builds(request.game).contains(&request.os) {
         return Err(Error::Install(format!(
-            "{} has no Windows build on GOG, and the Windows build is what runs under Proton",
-            request.game.title
+            "{} has no {} build on GOG",
+            request.game.title,
+            os_label(request.os)
         )));
     }
     if request.steam == SteamPolicy::Refuse && tile::steam_is_running_from(context.steam_root) {
@@ -140,7 +145,43 @@ pub fn preflight(context: &Context, request: &Request) -> Result<ProtonTool> {
                 .to_string(),
         ));
     }
-    proton::choose(context.steam_root, None)
+    match request.os {
+        Os::Windows => proton::choose(context.steam_root, None).map(Some),
+        _ => Ok(None),
+    }
+}
+
+/// The builds of `game` this machine can install, best first: the native Linux
+/// build when GOG has one, then the Windows build under Proton.
+pub fn builds(game: &Game) -> Vec<Os> {
+    [Os::Linux, Os::Windows]
+        .into_iter()
+        .filter(|os| game.runs_on.contains(os))
+        .collect()
+}
+
+/// The build to install when nobody says which.
+pub fn preferred(game: &Game) -> Option<Os> {
+    builds(game).first().copied()
+}
+
+/// A build's name in messages.
+pub fn os_label(os: Os) -> &'static str {
+    match os {
+        Os::Linux => "Linux",
+        Os::Windows => "Windows",
+        Os::Mac => "Mac",
+    }
+}
+
+/// Where `os`'s build of `game` is installed. The two builds of one game live
+/// side by side, so switching does not overwrite what the other left behind.
+pub fn target_dir(context: &Context, game: &Game, os: Os) -> PathBuf {
+    let name = install_dir_name(&game.title);
+    install_root(context).join(match os {
+        Os::Linux => format!("{name} (Linux)"),
+        _ => name,
+    })
 }
 
 /// Install a game, reporting progress through `events`. The registry follows it
@@ -163,7 +204,14 @@ pub fn install(
     );
     registry.save(context.paths)?;
 
-    let result = run(context, request, &tool, previous, &mut registry, events);
+    let result = run(
+        context,
+        request,
+        tool.as_ref(),
+        previous,
+        &mut registry,
+        events,
+    );
     // Reload before recording the end: the UI may have been writing other games'
     // rows meanwhile, and this run only owns its own.
     let mut registry = Registry::load(context.paths)?;
@@ -175,6 +223,7 @@ pub fn install(
                 outcome.target.clone(),
                 outcome.appid,
             );
+            registry.update(id, |entry| entry.platform = Some(outcome.os));
         }
         Err(error) => registry.mark_failed(id, error.to_string()),
     }
@@ -189,7 +238,7 @@ fn install_root(context: &Context) -> PathBuf {
 fn run(
     context: &Context,
     request: &Request,
-    tool: &ProtonTool,
+    tool: Option<&ProtonTool>,
     previous: Option<u32>,
     registry: &mut Registry,
     events: &mut dyn FnMut(Event),
@@ -200,8 +249,13 @@ fn run(
     let mut warnings = Vec::new();
 
     // 1. Download.
-    let installer =
-        installer::windows_installer(&http, context.access_token, &game.id, request.language)?;
+    let installer = installer::installer(
+        &http,
+        context.access_token,
+        &game.id,
+        request.os,
+        request.language,
+    )?;
     let download_dir = installer::download_dir(paths, &game.id);
     let count = installer.files.len();
     let mut setup = None;
@@ -237,41 +291,74 @@ fn run(
         SystemTime::now(),
     );
     registry.save(paths)?;
-    let target = install_root(context).join(install_dir_name(&game.title));
-    let task = match installer::primary_task(&target, &game.id) {
-        Ok(task) => {
-            events(Event::AlreadyInstalled {
-                target: target.clone(),
-            });
-            task
-        }
-        Err(_) => {
-            events(Event::Installing {
-                target: target.clone(),
-            });
-            let prefix = paths.cache_dir.join("prefixes").join(game.id.as_str());
-            inno::install(&inno::Setup {
-                proton: tool,
-                steam_root: context.steam_root,
-                installer: &setup,
-                target: &target,
-                prefix: &prefix,
-                log: &install_log(paths, game),
-                timeout: INSTALL_TIMEOUT,
-            })?;
-            if let Some(left) = inno::discard_prefix(&prefix) {
-                warnings.push(format!(
-                    "could not remove the install prefix {}",
-                    left.display()
-                ));
+    let target = target_dir(context, game, request.os);
+    let task = match tool {
+        None => match native::play_task(&target) {
+            Some(task) => {
+                events(Event::AlreadyInstalled {
+                    target: target.clone(),
+                });
+                task
             }
-            installer::primary_task(&target, &game.id)?
+            None => {
+                if installer.files.len() > 1 {
+                    return Err(Error::Install(format!(
+                        "the Linux installer of {} comes in {} files, which is not handled yet",
+                        game.title,
+                        installer.files.len()
+                    )));
+                }
+                events(Event::Installing {
+                    target: target.clone(),
+                });
+                let work = paths.cache_dir.join("extract").join(game.id.as_str());
+                native::install(&setup, &target, &work)?;
+                native::play_task(&target).ok_or_else(|| {
+                    Error::Install(format!("{} has no start.sh", target.display()))
+                })?
+            }
+        },
+        Some(tool) => {
+            let task = match installer::primary_task(&target, &game.id) {
+                Ok(task) => {
+                    events(Event::AlreadyInstalled {
+                        target: target.clone(),
+                    });
+                    task
+                }
+                Err(_) => {
+                    events(Event::Installing {
+                        target: target.clone(),
+                    });
+                    let prefix = paths.cache_dir.join("prefixes").join(game.id.as_str());
+                    inno::install(&inno::Setup {
+                        proton: tool,
+                        steam_root: context.steam_root,
+                        installer: &setup,
+                        target: &target,
+                        prefix: &prefix,
+                        log: &install_log(paths, game),
+                        timeout: INSTALL_TIMEOUT,
+                    })?;
+                    if let Some(left) = inno::discard_prefix(&prefix) {
+                        warnings.push(format!(
+                            "could not remove the install prefix {}",
+                            left.display()
+                        ));
+                    }
+                    installer::primary_task(&target, &game.id)?
+                }
+            };
+            // The per-game fixes are for Windows builds and their launchers.
+            gamestore_core::fixes::apply(&game.id, &target, task)
         }
     };
-    let task = gamestore_core::fixes::apply(&game.id, &target, task);
 
     // 3. The shortcut it will get, and so its appid.
-    let icon = target.join(format!("goggame-{}.ico", game.id));
+    let icon = match tool {
+        None => native::icon(&target).unwrap_or_default(),
+        Some(_) => target.join(format!("goggame-{}.ico", game.id)),
+    };
     let shortcut = Shortcut {
         app_name: game.title.clone(),
         exe: task.exe.display().to_string(),
@@ -306,7 +393,7 @@ fn run(
         start_dir: shortcut.start_dir.clone(),
         launch_options: shortcut.launch_options.clone(),
         icon: shortcut.icon.clone(),
-        tool: tool.name.clone(),
+        tool: tool.map(|tool| tool.name.clone()).unwrap_or_default(),
         replaces: previous,
     };
     let running = tile::steam_is_running_from(context.steam_root);
@@ -365,11 +452,18 @@ fn run(
         }
     };
 
+    let version = match tool {
+        None => native::version(&target),
+        Some(_) => None,
+    }
+    .or_else(|| installer.version.clone())
+    .unwrap_or_default();
     Ok(Outcome {
         appid,
         exe: task.exe,
         target,
-        version: installer.version.clone().unwrap_or_default(),
+        version,
+        os: request.os,
         pending,
         restarted,
         art,

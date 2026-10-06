@@ -1,6 +1,16 @@
 //! What the UI says, in English or Spanish after the system language.
 
 pub struct Text {
+    pub install_linux: &'static str,
+    pub install_windows: &'static str,
+    pub switch_linux: &'static str,
+    pub switch_windows: &'static str,
+    pub linux_build: &'static str,
+    pub windows_build: &'static str,
+    pub downloads: &'static str,
+    pub downloads_empty: &'static str,
+    pub menu: &'static str,
+    pub quit_store: &'static str,
     pub all: &'static str,
     pub tabs: &'static str,
     pub search_hint: &'static str,
@@ -39,6 +49,16 @@ pub struct Text {
 }
 
 const EN: Text = Text {
+    install_linux: "Install (Linux)",
+    install_windows: "Install (Windows)",
+    switch_linux: "Switch to Linux",
+    switch_windows: "Switch to Windows",
+    linux_build: "Native Linux version",
+    windows_build: "Windows version, under Proton",
+    downloads: "Downloads",
+    downloads_empty: "Nothing downloading or installing.",
+    menu: "Menu",
+    quit_store: "Quit GameStore",
     all: "All",
     tabs: "All / Installed",
     search_hint: "Search",
@@ -78,6 +98,16 @@ const EN: Text = Text {
 };
 
 const ES: Text = Text {
+    install_linux: "Instalar (Linux)",
+    install_windows: "Instalar (Windows)",
+    switch_linux: "Cambiar a Linux",
+    switch_windows: "Cambiar a Windows",
+    linux_build: "Versión nativa de Linux",
+    windows_build: "Versión de Windows, con Proton",
+    downloads: "Descargas",
+    downloads_empty: "No hay nada descargándose ni instalándose.",
+    menu: "Menú",
+    quit_store: "Salir de GameStore",
     all: "Todos",
     tabs: "Todos / Instalados",
     search_hint: "Buscar",

@@ -37,7 +37,8 @@ pub struct PendingTile {
     pub start_dir: String,
     pub launch_options: String,
     pub icon: String,
-    /// The compatibility tool's internal name.
+    /// The compatibility tool's internal name; empty for a native build, which
+    /// must run without one.
     pub tool: String,
     /// The appid of the game's previous tile, when it had one under a different
     /// appid: it is removed, with its mapping and artwork, so a game never ends up
@@ -127,7 +128,11 @@ pub fn write(steam_root: &Path, tile: &PendingTile) -> Result<()> {
         };
         write_shortcut(user, &shortcut)?;
     }
-    proton::map(steam_root, shortcut.appid(), &tile.tool)
+    if tile.tool.is_empty() {
+        proton::unmap(steam_root, shortcut.appid()).map(|_| ())
+    } else {
+        proton::map(steam_root, shortcut.appid(), &tile.tool)
+    }
 }
 
 fn write_shortcut(user: &SteamUser, shortcut: &Shortcut) -> Result<()> {

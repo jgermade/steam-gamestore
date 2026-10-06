@@ -65,6 +65,10 @@ enum Command {
     Install {
         /// The game: its GOG id, its title, or a part of the title only it has.
         game: String,
+        /// Which build: the native Linux one is used when GOG has it, unless this
+        /// says otherwise.
+        #[arg(long, value_enum)]
+        platform: Option<install::Platform>,
         /// Installer language, when GOG has more than one.
         #[arg(long, default_value = "en")]
         language: String,
@@ -432,6 +436,7 @@ fn run(cli: Cli) -> Result<()> {
         #[cfg(target_os = "linux")]
         Command::Install {
             game,
+            platform: build,
             language,
             user,
             all_users,
@@ -455,6 +460,7 @@ fn run(cli: Cli) -> Result<()> {
                 &catalog,
                 &install::Options {
                     query: game,
+                    platform: build,
                     language,
                     user,
                     all_users,

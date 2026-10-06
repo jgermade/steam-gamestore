@@ -8,7 +8,7 @@
 //! manifest protocol involved. The Galaxy content system (`man`, `dl`) can come
 //! later for what it is better at, such as delta updates.
 //!
-//! Flow: [`windows_installer`] picks the installer, [`resolve`] turns each file's
+//! Flow: [`installer`] picks the installer, [`resolve`] turns each file's
 //! `downlink` into a CDN address and a checksum address, [`Checksum::parse`] reads
 //! the latter, and [`download`] fetches into the cache, verifying chunk by chunk.
 
@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use md5::{Digest, Md5};
 use serde::Deserialize;
 
-use crate::catalog::ProductId;
+use crate::catalog::{Os, ProductId};
 use crate::http::{Fetch, HttpClient};
 use crate::{Error, Paths, Result};
 
@@ -68,14 +68,17 @@ pub fn download_dir(paths: &Paths, id: &ProductId) -> PathBuf {
     paths.cache_dir.join("downloads").join(id.as_str())
 }
 
-/// The Windows installer for `id`: in `language` when there is one, in English
-/// when there is not, and otherwise in whatever GOG has. The Windows build is the
-/// one that runs under Proton, which is the whole point of this project, so the
-/// native Linux and Mac installers are never chosen here.
-pub fn windows_installer<H: HttpClient>(
+/// The installer for `id` on `os`: in `language` when there is one, in English
+/// when there is not, and otherwise in whatever GOG has.
+///
+/// The Windows build runs under Proton; a native Linux build, when GOG has one, is
+/// usually the better choice and is what `platform_linux::install` prefers. Mac
+/// installers are never useful here.
+pub fn installer<H: HttpClient>(
     http: &H,
     access_token: &str,
     id: &ProductId,
+    os: Os,
     language: &str,
 ) -> Result<Installer> {
     let url = format!("{PRODUCT_ENDPOINT}/{id}?expand=downloads");
@@ -93,25 +96,34 @@ pub fn windows_installer<H: HttpClient>(
         ))
     })?;
 
-    choose(product.downloads.installers, language)
-        .ok_or_else(|| Error::Download(format!("{id} has no Windows installer on GOG")))
+    choose(product.downloads.installers, os, language)
+        .ok_or_else(|| Error::Download(format!("{id} has no {} installer on GOG", os_name(os))))
 }
 
-fn choose(installers: Vec<Installer>, language: &str) -> Option<Installer> {
-    let windows: Vec<_> = installers
+/// GOG's spelling of an operating system in the downloads API.
+pub fn os_name(os: Os) -> &'static str {
+    match os {
+        Os::Windows => "windows",
+        Os::Linux => "linux",
+        Os::Mac => "mac",
+    }
+}
+
+fn choose(installers: Vec<Installer>, os: Os, language: &str) -> Option<Installer> {
+    let matching: Vec<_> = installers
         .into_iter()
-        .filter(|installer| installer.os == "windows" && !installer.files.is_empty())
+        .filter(|installer| installer.os == os_name(os) && !installer.files.is_empty())
         .collect();
-    let position = windows
+    let position = matching
         .iter()
         .position(|installer| installer.language == language)
         .or_else(|| {
-            windows
+            matching
                 .iter()
                 .position(|installer| installer.language == "en")
         })
-        .or(if windows.is_empty() { None } else { Some(0) })?;
-    windows.into_iter().nth(position)
+        .or(if matching.is_empty() { None } else { Some(0) })?;
+    matching.into_iter().nth(position)
 }
 
 /// Where one installer file actually is.
@@ -683,13 +695,23 @@ mod tests {
 
     #[test]
     fn the_windows_installer_is_picked_out_of_the_real_response() {
-        let installer = windows_installer(
+        let installer = installer(
             &Api(XENO_CRISIS_DOWNLOADS),
             "token",
             &"1955095293".into(),
+            Os::Windows,
             "es",
         )
         .unwrap();
+        let linux = super::installer(
+            &Api(XENO_CRISIS_DOWNLOADS),
+            "token",
+            &"1955095293".into(),
+            Os::Linux,
+            "en",
+        )
+        .unwrap();
+        assert_eq!(linux.files[0].id, "en3installer0");
 
         assert_eq!(installer.os, "windows");
         assert_eq!(installer.language, "en");
@@ -698,7 +720,7 @@ mod tests {
         assert_eq!(installer.files[0].id, "en1installer0");
     }
 
-    fn installer(language: &str, os: &str) -> Installer {
+    fn fake(language: &str, os: &str) -> Installer {
         Installer {
             id: format!("installer_{os}_{language}"),
             os: os.to_string(),
@@ -715,19 +737,25 @@ mod tests {
     #[test]
     fn the_language_falls_back_to_english_and_then_to_anything() {
         let all = vec![
-            installer("de", "windows"),
-            installer("en", "windows"),
-            installer("es", "linux"),
+            fake("de", "windows"),
+            fake("en", "windows"),
+            fake("es", "linux"),
         ];
-        assert_eq!(choose(all.clone(), "de").unwrap().language, "de");
-        assert_eq!(choose(all.clone(), "es").unwrap().language, "en");
         assert_eq!(
-            choose(vec![installer("fr", "windows")], "es")
+            choose(all.clone(), Os::Windows, "de").unwrap().language,
+            "de"
+        );
+        assert_eq!(
+            choose(all.clone(), Os::Windows, "es").unwrap().language,
+            "en"
+        );
+        assert_eq!(
+            choose(vec![fake("fr", "windows")], Os::Windows, "es")
                 .unwrap()
                 .language,
             "fr"
         );
-        assert_eq!(choose(vec![installer("es", "linux")], "es"), None);
+        assert_eq!(choose(vec![fake("es", "linux")], Os::Windows, "es"), None);
     }
 
     #[test]

@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
-use gamestore_core::catalog::{Game, ProductId};
+use gamestore_core::catalog::{Game, Os, ProductId};
 use gamestore_core::{Config, Paths, Result};
 use gamestore_platform_linux::install::{self, Context, Event, Request, SteamPolicy};
 use gamestore_platform_linux::shortcuts::SteamUser;
@@ -62,22 +62,22 @@ impl Progress {
 }
 
 pub struct Jobs {
-    queue: Sender<Game>,
+    queue: Sender<(Game, Os)>,
     updates: Receiver<(ProductId, Progress)>,
 }
 
 impl Jobs {
     pub fn new(machine: Machine, wake: impl Fn() + Send + Sync + 'static) -> Self {
-        let (queue, waiting) = channel::<Game>();
+        let (queue, waiting) = channel::<(Game, Os)>();
         let (report, updates) = channel();
         std::thread::spawn(move || {
-            for game in waiting {
+            for (game, os) in waiting {
                 let id = game.id.clone();
                 let send = |progress| {
                     let _ = report.send((id.clone(), progress));
                     wake();
                 };
-                let result = run(&machine, &game, &send);
+                let result = run(&machine, &game, os, &send);
                 send(match result {
                     Ok(pending) => Progress::Done { pending },
                     Err(error) => Progress::Failed(error.to_string()),
@@ -89,8 +89,8 @@ impl Jobs {
 
     /// Queue a game. The caller marks it `Queued` itself, so the cover changes at
     /// once.
-    pub fn install(&self, game: Game) {
-        let _ = self.queue.send(game);
+    pub fn install(&self, game: Game, os: Os) {
+        let _ = self.queue.send((game, os));
     }
 
     /// Progress reported since the last call.
@@ -99,7 +99,7 @@ impl Jobs {
     }
 }
 
-fn run(machine: &Machine, game: &Game, send: &dyn Fn(Progress)) -> Result<bool> {
+fn run(machine: &Machine, game: &Game, os: Os, send: &dyn Fn(Progress)) -> Result<bool> {
     let token = (machine.token)()?;
     let context = Context {
         config: &machine.config,
@@ -109,6 +109,7 @@ fn run(machine: &Machine, game: &Game, send: &dyn Fn(Progress)) -> Result<bool> 
     };
     let request = Request {
         game,
+        os,
         users: &machine.users,
         language: &machine.language,
         artwork: true,

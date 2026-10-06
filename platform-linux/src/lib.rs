@@ -3,6 +3,7 @@
 
 pub mod inno;
 pub mod install;
+pub mod native;
 pub mod pending;
 pub mod proton;
 pub mod shortcuts;

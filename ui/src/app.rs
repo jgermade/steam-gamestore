@@ -11,9 +11,9 @@ use eframe::egui::{
     self, Align2, Color32, FontId, Pos2, Rect, Stroke, StrokeKind, TextureHandle, TextureOptions,
     Vec2, pos2, text::LayoutJob, vec2,
 };
-use gamestore_core::catalog::{Game, ProductId};
+use gamestore_core::catalog::{Game, Os, ProductId};
 use gamestore_core::registry::{Registry, State};
-use gamestore_platform_linux::pending;
+use gamestore_platform_linux::{install, pending};
 
 use crate::covers::{self, Covers};
 use crate::input::{Input, Nav};
@@ -29,6 +29,7 @@ struct Known {
     failure: Option<String>,
     install_path: Option<String>,
     build: Option<String>,
+    platform: Option<Os>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,10 +41,22 @@ enum Tab {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Screen {
     Grid,
-    Detail { button: usize },
+    Detail {
+        button: usize,
+    },
     Keyboard,
-    ConfirmRestart { button: usize },
-    ConfirmQuit { button: usize },
+    ConfirmRestart {
+        button: usize,
+    },
+    ConfirmQuit {
+        button: usize,
+    },
+    /// What is downloading or installing, and what finished this session.
+    Downloads,
+    /// Start: restart Steam, or quit.
+    Menu {
+        button: usize,
+    },
 }
 
 pub struct App {
@@ -66,6 +79,8 @@ pub struct App {
     input: Input,
     covers: Covers,
     jobs: Jobs,
+    /// Which build each install started this session is of.
+    building: HashMap<ProductId, Os>,
     loaded_at: Instant,
     pending: usize,
     notice: Option<(String, Instant)>,
@@ -73,7 +88,7 @@ pub struct App {
 
 impl App {
     pub fn new(ctx: &egui::Context, machine: Machine, mut games: Vec<Game>) -> Self {
-        games.retain(Game::has_windows_build);
+        games.retain(|game| !install::builds(game).is_empty());
         games.sort_by_key(|game| fold(&game.title));
         let keys = games.iter().map(|game| fold(&game.title)).collect();
 
@@ -106,6 +121,7 @@ impl App {
             input: Input::new(),
             covers,
             jobs,
+            building: HashMap::new(),
             loaded_at: Instant::now() - Duration::from_secs(60),
             pending: 0,
             notice: None,
@@ -133,6 +149,7 @@ impl App {
                                 .as_ref()
                                 .map(|path| path.display().to_string()),
                             build: entry.build.clone().filter(|build| !build.is_empty()),
+                            platform: entry.platform,
                         },
                     )
                 })
@@ -186,18 +203,27 @@ impl App {
         self.notice = Some((message.into(), Instant::now()));
     }
 
-    fn start_install(&mut self) {
+    fn start_install(&mut self, os: Os) {
         let Some(game) = self.current().cloned() else {
             return;
         };
-        if !game.has_windows_build() {
+        if !install::builds(&game).contains(&os) {
             return;
         }
         if self.progress.get(&game.id).is_some_and(Progress::active) {
             return;
         }
         self.progress.insert(game.id.clone(), Progress::Queued);
-        self.jobs.install(game);
+        self.building.insert(game.id.clone(), os);
+        self.jobs.install(game, os);
+    }
+
+    fn quit(&mut self, ctx: &egui::Context) {
+        if self.any_active() {
+            self.screen = Screen::ConfirmQuit { button: 1 };
+        } else {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
     }
 
     fn restart_steam(&mut self, ctx: &egui::Context) {
@@ -249,8 +275,12 @@ impl App {
                         }
                     }
                     Nav::Accept => match self.detail_buttons().get(button).copied() {
-                        Some(DetailAction::Install) => {
-                            self.start_install();
+                        Some(DetailAction::Install(os)) => {
+                            self.start_install(os);
+                            self.screen = Screen::Grid;
+                        }
+                        Some(DetailAction::Switch(os)) => {
+                            self.start_install(os);
                             self.screen = Screen::Grid;
                         }
                         Some(DetailAction::Restart) => {
@@ -273,6 +303,36 @@ impl App {
                 Nav::Accept | Nav::Back => self.screen = Screen::Grid,
                 _ => {}
             },
+            Screen::Downloads => {
+                if matches!(nav, Nav::Back | Nav::Accept) {
+                    self.screen = Screen::Grid;
+                }
+            }
+            Screen::Menu { button } => match nav {
+                Nav::Up | Nav::Left => {
+                    self.screen = Screen::Menu {
+                        button: button.saturating_sub(1),
+                    }
+                }
+                Nav::Down | Nav::Right => {
+                    self.screen = Screen::Menu {
+                        button: (button + 1).min(2),
+                    }
+                }
+                Nav::Accept => match button {
+                    0 => {
+                        self.screen = Screen::Grid;
+                        self.restart_steam(ctx);
+                    }
+                    1 => {
+                        self.screen = Screen::Grid;
+                        self.quit(ctx);
+                    }
+                    _ => self.screen = Screen::Grid,
+                },
+                Nav::Back | Nav::Menu => self.screen = Screen::Grid,
+                _ => {}
+            },
             Screen::ConfirmQuit { button } => match nav {
                 Nav::Left | Nav::Right | Nav::Up | Nav::Down => {
                     self.screen = Screen::ConfirmQuit { button: 1 - button }
@@ -284,7 +344,7 @@ impl App {
         }
     }
 
-    fn handle_grid(&mut self, nav: Nav, ctx: &egui::Context) {
+    fn handle_grid(&mut self, nav: Nav, _ctx: &egui::Context) {
         let count = self.visible.len();
         let columns = self.columns.max(1);
         match nav {
@@ -313,23 +373,15 @@ impl App {
                 };
                 self.refilter();
             }
-            Nav::Menu
-                if self.pending > 0
-                    || self
-                        .progress
-                        .values()
-                        .any(|p| matches!(p, Progress::Done { pending: true })) =>
-            {
-                self.screen = Screen::ConfirmRestart { button: 0 }
-            }
+            Nav::Menu => self.screen = Screen::Menu { button: 0 },
+            // B never closes the store: it clears a search, or shows what is
+            // downloading and installing.
             Nav::Back => {
                 if !self.filter.is_empty() {
                     self.filter.clear();
                     self.refilter();
-                } else if self.any_active() {
-                    self.screen = Screen::ConfirmQuit { button: 1 };
                 } else {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    self.screen = Screen::Downloads;
                 }
             }
             _ => {}
@@ -341,17 +393,26 @@ impl App {
             return vec![DetailAction::Back];
         };
         let progress = self.progress.get(&game.id);
-        let waiting = progress.is_some_and(|p| matches!(p, Progress::Done { pending: true }));
-        if waiting {
+        if progress.is_some_and(|p| matches!(p, Progress::Done { pending: true })) {
             return vec![DetailAction::Restart, DetailAction::Back];
         }
-        if progress.is_some_and(Progress::active)
-            || self.installed(&game.id)
-            || !game.has_windows_build()
-        {
+        if progress.is_some_and(Progress::active) {
             return vec![DetailAction::Back];
         }
-        vec![DetailAction::Install, DetailAction::Back]
+        let builds = install::builds(game);
+        let mut actions: Vec<DetailAction> = if self.installed(&game.id) {
+            // Installed: offer the other build, when there is one.
+            let current = self.known.get(&game.id).and_then(|known| known.platform);
+            builds
+                .into_iter()
+                .filter(|os| Some(*os) != current.or(Some(Os::Windows)))
+                .map(DetailAction::Switch)
+                .collect()
+        } else {
+            builds.into_iter().map(DetailAction::Install).collect()
+        };
+        actions.push(DetailAction::Back);
+        actions
     }
 
     /// The badge for a game: what it says and its colour.
@@ -402,7 +463,9 @@ impl App {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DetailAction {
-    Install,
+    Install(Os),
+    /// Install the other build of an installed game; its tile replaces the old one.
+    Switch(Os),
     Restart,
     Back,
 }
@@ -482,6 +545,17 @@ impl eframe::App for App {
                     [text.quit, text.cancel],
                     button,
                 )
+            }
+            Screen::Downloads => self.draw_downloads(&painter, screen),
+            Screen::Menu { button } => {
+                let text = self.text;
+                draw_menu(
+                    &painter,
+                    screen,
+                    text.menu,
+                    [text.restart_steam, text.quit_store, text.cancel],
+                    button,
+                );
             }
             Screen::Grid => {}
         }
@@ -744,8 +818,8 @@ impl App {
             ("A", text.select),
             ("Y", text.search),
             ("LB/RB", text.tabs),
-            ("Start", text.restart_steam),
-            ("B", text.quit),
+            ("B", text.downloads),
+            ("Start", text.menu),
         ];
         let mut x = footer.min.x + layout.area.min.x - screen.min.x;
         for (button, label) in hints {
@@ -871,6 +945,133 @@ impl App {
         }
     }
 
+    /// What is downloading or installing, and what finished this session.
+    fn draw_downloads(&self, painter: &egui::Painter, screen: Rect) {
+        let text = self.text;
+        painter.rect_filled(screen, 0.0, Color32::from_black_alpha(215));
+        let panel = Rect::from_center_size(
+            screen.center(),
+            vec2(screen.width() * 0.62, screen.height() * 0.74),
+        );
+        painter.rect_filled(panel, 20.0, theme::PANEL);
+        let inner = panel.shrink(screen.height() * 0.04);
+        painter.text(
+            inner.min,
+            Align2::LEFT_TOP,
+            text.downloads,
+            FontId::proportional(screen.height() * 0.045),
+            theme::TEXT,
+        );
+
+        // Working ones first, in the order they will run; then what finished.
+        let mut rows: Vec<(&Game, &Progress)> = self
+            .games
+            .iter()
+            .filter_map(|game| self.progress.get(&game.id).map(|progress| (game, progress)))
+            .collect();
+        rows.sort_by_key(|(_, progress)| match progress {
+            Progress::Downloading { .. } | Progress::Installing | Progress::Finishing => 0,
+            Progress::Queued => 1,
+            Progress::Failed(_) => 2,
+            Progress::Done { .. } => 3,
+        });
+
+        let font = FontId::proportional(screen.height() * 0.03);
+        let small = FontId::proportional(screen.height() * 0.022);
+        if rows.is_empty() {
+            painter.text(
+                inner.center(),
+                Align2::CENTER_CENTER,
+                text.downloads_empty,
+                font,
+                theme::DIM,
+            );
+            return;
+        }
+        let row_height = screen.height() * 0.1;
+        let time = painter.ctx().input(|input| input.time) as f32;
+        for (index, (game, progress)) in rows.iter().enumerate() {
+            let top = inner.min.y + screen.height() * 0.08 + index as f32 * row_height;
+            if top + row_height > inner.max.y {
+                break;
+            }
+            let row = Rect::from_min_size(
+                pos2(inner.min.x, top),
+                vec2(inner.width(), row_height * 0.86),
+            );
+            painter.rect_filled(row, 12.0, theme::BACKGROUND);
+            let build = match self.building.get(&game.id) {
+                Some(Os::Linux) => " · Linux",
+                Some(Os::Windows) => " · Windows",
+                _ => "",
+            };
+            painter.text(
+                row.min + vec2(20.0, 12.0),
+                Align2::LEFT_TOP,
+                format!("{}{build}", game.title),
+                font.clone(),
+                theme::TEXT,
+            );
+            let (label, colour) = self.badge(&game.id).unwrap_or_default();
+            painter.text(
+                pos2(row.max.x - 20.0, row.min.y + 12.0),
+                Align2::RIGHT_TOP,
+                label,
+                small.clone(),
+                colour,
+            );
+            if let Progress::Failed(reason) = progress {
+                let mut job = LayoutJob::simple(
+                    reason.clone(),
+                    small.clone(),
+                    theme::FAILED,
+                    row.width() - 40.0,
+                );
+                job.wrap.max_rows = 1;
+                job.wrap.overflow_character = Some('…');
+                painter.galley(
+                    pos2(row.min.x + 20.0, row.max.y - 34.0),
+                    painter.layout_job(job),
+                    theme::FAILED,
+                );
+            }
+            let bar = Rect::from_min_max(
+                pos2(row.min.x + 20.0, row.max.y - 18.0),
+                pos2(row.max.x - 20.0, row.max.y - 8.0),
+            );
+            match progress {
+                Progress::Downloading { fraction, .. } => {
+                    painter.rect_filled(bar, 4.0, theme::TRACK);
+                    painter.rect_filled(
+                        Rect::from_min_max(
+                            bar.min,
+                            pos2(
+                                bar.min.x + bar.width() * fraction.clamp(0.0, 1.0),
+                                bar.max.y,
+                            ),
+                        ),
+                        4.0,
+                        theme::WORKING,
+                    );
+                }
+                Progress::Installing | Progress::Finishing => {
+                    painter.rect_filled(bar, 4.0, theme::TRACK);
+                    let span = bar.width() * 0.3;
+                    let start = bar.min.x - span + (time * 0.6).fract() * (bar.width() + span);
+                    painter.rect_filled(
+                        Rect::from_min_max(
+                            pos2(start.max(bar.min.x), bar.min.y),
+                            pos2((start + span).min(bar.max.x), bar.max.y),
+                        ),
+                        4.0,
+                        theme::WORKING,
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn draw_detail(&self, painter: &egui::Painter, screen: Rect, button: usize) {
         let Some(game) = self.current() else { return };
         let text = self.text;
@@ -925,6 +1126,11 @@ impl App {
             ),
             _ if self.installed(&game.id) => {
                 write(text.play_in_steam.to_string(), 0.03, theme::TEXT, &mut y);
+                let build = match known.platform {
+                    Some(Os::Linux) => text.linux_build,
+                    _ => text.windows_build,
+                };
+                write(build.to_string(), 0.025, theme::DIM, &mut y);
                 if let Some(build) = &known.build {
                     write(
                         format!("{}: {build}", text.version),
@@ -957,8 +1163,20 @@ impl App {
         let y = cover.max.y - screen.height() * 0.08;
         for (index, action) in self.detail_buttons().iter().enumerate() {
             let label = match action {
-                DetailAction::Install if self.failure(&game.id).is_some() => text.retry,
-                DetailAction::Install => text.install,
+                DetailAction::Install(_)
+                    if self.failure(&game.id).is_some() && install::builds(game).len() == 1 =>
+                {
+                    text.retry
+                }
+                DetailAction::Install(Os::Linux) if install::builds(game).len() > 1 => {
+                    text.install_linux
+                }
+                DetailAction::Install(Os::Windows) if install::builds(game).len() > 1 => {
+                    text.install_windows
+                }
+                DetailAction::Install(_) => text.install,
+                DetailAction::Switch(Os::Linux) => text.switch_linux,
+                DetailAction::Switch(_) => text.switch_windows,
                 DetailAction::Restart => text.restart_steam,
                 DetailAction::Back => text.back,
             };
@@ -996,6 +1214,51 @@ fn draw_button(
         if focused { Color32::BLACK } else { theme::TEXT },
     );
     rect
+}
+
+fn draw_menu(painter: &egui::Painter, screen: Rect, title: &str, items: [&str; 3], focused: usize) {
+    painter.rect_filled(screen, 0.0, Color32::from_black_alpha(200));
+    let font = FontId::proportional(screen.height() * 0.035);
+    let panel = Rect::from_center_size(
+        screen.center(),
+        vec2(screen.width() * 0.34, screen.height() * 0.5),
+    );
+    painter.rect_filled(panel, 20.0, theme::PANEL);
+    let inner = panel.shrink(screen.height() * 0.04);
+    painter.text(
+        inner.min,
+        Align2::LEFT_TOP,
+        title,
+        FontId::proportional(screen.height() * 0.045),
+        theme::TEXT,
+    );
+    let height = screen.height() * 0.085;
+    for (index, label) in items.iter().enumerate() {
+        let rect = Rect::from_min_size(
+            pos2(
+                inner.min.x,
+                inner.min.y + screen.height() * 0.09 + index as f32 * (height + 14.0),
+            ),
+            vec2(inner.width(), height),
+        );
+        let focused = index == focused;
+        painter.rect_filled(rect, 14.0, if focused { theme::ACCENT } else { theme::KEY });
+        if focused {
+            painter.rect_stroke(
+                rect,
+                14.0,
+                Stroke::new(3.0, Color32::WHITE),
+                StrokeKind::Outside,
+            );
+        }
+        painter.text(
+            rect.left_center() + vec2(28.0, 0.0),
+            Align2::LEFT_CENTER,
+            label,
+            font.clone(),
+            if focused { Color32::BLACK } else { theme::TEXT },
+        );
+    }
 }
 
 fn draw_confirm(
