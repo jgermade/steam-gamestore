@@ -57,7 +57,7 @@ __declspec(dllimport) void __stdcall ExitProcess(unsigned int);
 #define DM_BITSPERPEL 0x00040000
 #define DM_PELSWIDTH 0x00080000
 #define DM_PELSHEIGHT 0x00100000
-#define CDS_FULLSCREEN 0x00000004
+#define CDS_UPDATEREGISTRY 0x00000001
 #define INFINITE 0xFFFFFFFF
 
 /* Skip the first word of a command line, quoted or not. */
@@ -80,13 +80,18 @@ void start(void) {
     for (unsigned i = 0; i < sizeof mode; i++) ((char *)&mode)[i] = 0;
     mode.dmSize = sizeof mode;
     BOOL known = EnumDisplaySettingsA(0, ENUM_CURRENT_SETTINGS, &mode);
+    DWORD original = mode.dmBitsPerPel;
     if (known) {
         mode.dmBitsPerPel = 16;
         /* The size has to be named too: with the depth alone Wine accepts the
          * change, yet only this process sees it, not the game it starts. */
         mode.dmFields = DM_BITSPERPEL | DM_PELSWIDTH | DM_PELSHEIGHT;
-        /* CDS_FULLSCREEN: temporary, undone when this process ends. */
-        ChangeDisplaySettingsA(&mode, CDS_FULLSCREEN);
+        /* Registered, not CDS_FULLSCREEN: games and wrappers such as dgVoodoo
+         * "restore the desktop" with ChangeDisplaySettings(NULL, 0) when they
+         * re-create their display, and a temporary change would be undone right
+         * there, failing the game's next depth check. It is put back below,
+         * whatever way the game ends. */
+        ChangeDisplaySettingsA(&mode, CDS_UPDATEREGISTRY);
     }
 
     STARTUPINFOA startup;
@@ -98,6 +103,9 @@ void start(void) {
         WaitForSingleObject(process.hProcess, INFINITE);
         GetExitCodeProcess(process.hProcess, &code);
     }
-    if (known) ChangeDisplaySettingsA(0, 0);
+    if (known) {
+        mode.dmBitsPerPel = original;
+        ChangeDisplaySettingsA(&mode, CDS_UPDATEREGISTRY);
+    }
     ExitProcess(code);
 }
