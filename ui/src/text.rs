@@ -1,6 +1,9 @@
 //! What the UI says, in English or Spanish after the system language.
 
 pub struct Text {
+    pub options: &'static str,
+    pub accept: &'static str,
+    pub type_key: &'static str,
     pub download_size: &'static str,
     pub on_disk: &'static str,
     pub screenshots: &'static str,
@@ -55,12 +58,15 @@ pub struct Text {
 }
 
 const EN: Text = Text {
+    options: "Options",
+    accept: "Accept",
+    type_key: "Type",
     download_size: "Download",
     on_disk: "On disk",
     screenshots: "Screenshots",
     video: "Video",
     video_needs: "Playing videos needs yt-dlp: sudo pacman -S yt-dlp",
-    stop_video: "B stops the video",
+    stop_video: "Stop the video",
     storage: "Storage",
     storage_other: "System and other",
     storage_free: "Free",
@@ -110,12 +116,15 @@ const EN: Text = Text {
 };
 
 const ES: Text = Text {
+    options: "Opciones",
+    accept: "Aceptar",
+    type_key: "Escribir",
     download_size: "Descarga",
     on_disk: "En disco",
     screenshots: "Capturas",
     video: "Vídeo",
     video_needs: "Para ver vídeos hace falta yt-dlp: sudo pacman -S yt-dlp",
-    stop_video: "B detiene el vídeo",
+    stop_video: "Detener el vídeo",
     storage: "Almacenamiento",
     storage_other: "Sistema y otros",
     storage_free: "Libre",

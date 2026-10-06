@@ -93,6 +93,8 @@ pub struct App {
     shots: HashMap<usize, Option<TextureHandle>>,
     shots_of: Option<ProductId>,
     shot: usize,
+    /// Where the screenshot column is scrolled to, easing towards `shot`.
+    shot_scroll: f32,
     disk: HashMap<ProductId, u64>,
     storage: Option<Option<Storage>>,
     storage_asked: Option<Instant>,
@@ -148,6 +150,7 @@ impl App {
             shots: HashMap::new(),
             shots_of: None,
             shot: 0,
+            shot_scroll: 0.0,
             disk: HashMap::new(),
             storage: None,
             storage_asked: None,
@@ -268,6 +271,7 @@ impl App {
             self.shots_asked.clear();
             self.shots_of = Some(game.id.clone());
             self.shot = 0;
+            self.shot_scroll = 0.0;
         }
         if let Some(path) = self
             .known
@@ -302,7 +306,8 @@ impl App {
             return;
         };
         let count = details.screenshots.len();
-        for index in [self.shot, (self.shot + 1) % count.max(1)] {
+        let previous = (self.shot + count.max(1) - 1) % count.max(1);
+        for index in [self.shot, (self.shot + 1) % count.max(1), previous] {
             if index < count && self.shots_asked.insert(index) {
                 self.media.screenshot(
                     game.id.clone(),
@@ -414,12 +419,12 @@ impl App {
             Screen::Detail { button } => {
                 let buttons = self.detail_buttons().len();
                 match nav {
-                    Nav::Left | Nav::Up => {
+                    Nav::Left => {
                         self.screen = Screen::Detail {
                             button: button.saturating_sub(1),
                         }
                     }
-                    Nav::Right | Nav::Down => {
+                    Nav::Right => {
                         self.screen = Screen::Detail {
                             button: (button + 1).min(buttons.saturating_sub(1)),
                         }
@@ -438,17 +443,18 @@ impl App {
                         }
                         Some(DetailAction::Back) | None => self.screen = Screen::Grid,
                     },
-                    Nav::Previous | Nav::Next => {
+                    // The screenshots run top to bottom, so up and down go through
+                    // them; the shoulders do too. They stop at the ends rather
+                    // than wrap, which a column makes obvious.
+                    Nav::Up | Nav::Down | Nav::Previous | Nav::Next => {
                         let count = self.current_details().map_or(0, |d| d.screenshots.len());
-                        if count > 0 {
-                            self.shot = if nav == Nav::Next {
-                                (self.shot + 1) % count
-                            } else {
-                                (self.shot + count - 1) % count
-                            };
+                        if matches!(nav, Nav::Down | Nav::Next) {
+                            self.shot = (self.shot + 1).min(count.saturating_sub(1));
+                        } else {
+                            self.shot = self.shot.saturating_sub(1);
                         }
                     }
-                    Nav::Action => self.play_video(),
+                    Nav::Search => self.play_video(),
                     Nav::Back => self.screen = Screen::Grid,
                     _ => {}
                 }
@@ -465,7 +471,7 @@ impl App {
                 _ => {}
             },
             Screen::Downloads => {
-                if matches!(nav, Nav::Back | Nav::Accept) {
+                if matches!(nav, Nav::Back | Nav::Accept | Nav::Action) {
                     self.screen = Screen::Grid;
                 }
             }
@@ -522,10 +528,7 @@ impl App {
             }
             Nav::Accept if count > 0 => self.open_detail(),
             Nav::Search => self.screen = Screen::Keyboard,
-            Nav::Action if !self.filter.is_empty() => {
-                self.filter.pop();
-                self.refilter();
-            }
+            Nav::Action => self.open_downloads(),
             Nav::Previous | Nav::Next => {
                 self.tab = if self.tab == Tab::All {
                     Tab::Installed
@@ -535,15 +538,11 @@ impl App {
                 self.refilter();
             }
             Nav::Menu => self.screen = Screen::Menu { button: 1 },
-            // B never closes the store: it clears a search, or shows what is
-            // downloading and installing.
-            Nav::Back => {
-                if !self.filter.is_empty() {
-                    self.filter.clear();
-                    self.refilter();
-                } else {
-                    self.open_downloads();
-                }
+            // B is "back" everywhere; on the grid that is clearing a search. It
+            // never closes the store: Start's menu does.
+            Nav::Back if !self.filter.is_empty() => {
+                self.filter.clear();
+                self.refilter();
             }
             _ => {}
         }
@@ -676,6 +675,10 @@ impl eframe::App for App {
         if matches!(self.screen, Screen::Detail { .. }) {
             self.want_screenshots();
         }
+        self.shot_scroll += (self.shot as f32 - self.shot_scroll) * 0.3;
+        if (self.shot as f32 - self.shot_scroll).abs() < 0.01 {
+            self.shot_scroll = self.shot as f32;
+        }
 
         // A physical keyboard types straight into the search, from any screen
         // where that makes sense.
@@ -754,6 +757,7 @@ impl eframe::App for App {
             }
             Screen::Grid => {}
         }
+        self.draw_footer(&painter, screen);
         if let Some((message, at)) = &self.notice {
             if at.elapsed() < Duration::from_secs(8) {
                 draw_notice(&painter, screen, message);
@@ -765,6 +769,7 @@ impl eframe::App for App {
         // gilrs does not wake the UI, so it is polled: quickly while something
         // moves, at a still responsive pace when nothing does.
         let busy = self.input.busy()
+            || (self.shot as f32 - self.shot_scroll).abs() > 0.01
             || self.any_active()
             || (self.scroll - self.scroll_target(screen)).abs() > 0.5;
         ctx.request_repaint_after(Duration::from_millis(if busy { 16 } else { 33 }));
@@ -783,7 +788,8 @@ struct Layout {
 impl App {
     fn layout(&self, screen: Rect) -> Layout {
         let margin = (screen.width() * 0.035).max(24.0);
-        let top = screen.min.y + header_height(screen);
+        // Room above the first row for the focused cover, which is drawn larger.
+        let top = screen.min.y + header_height(screen) + (screen.width() * 0.018).max(14.0);
         let bottom = screen.max.y - footer_height(screen);
         let area = Rect::from_min_max(
             pos2(screen.min.x + margin, top),
@@ -923,7 +929,11 @@ impl App {
         }
 
         // The covers.
-        let clip = painter.with_clip_rect(layout.area.expand(layout.gap));
+        // Clipped exactly at the header and the footer, never over them.
+        let clip = painter.with_clip_rect(Rect::from_min_max(
+            pos2(screen.min.x, screen.min.y + header_height(screen)),
+            pos2(screen.max.x, screen.max.y - footer_height(screen)),
+        ));
         if self.visible.is_empty() {
             painter.text(
                 layout.area.center(),
@@ -971,61 +981,6 @@ impl App {
                     theme::TEXT,
                 );
             }
-        }
-
-        // Hints along the bottom.
-        let footer = Rect::from_min_max(
-            pos2(screen.min.x, screen.max.y - footer_height(screen)),
-            screen.max,
-        );
-        painter.rect_filled(footer, 0.0, theme::PANEL);
-        let hints = [
-            ("A", text.select),
-            ("Y", text.search),
-            ("LB/RB", text.tabs),
-            ("B", text.downloads),
-            ("Start", text.menu),
-        ];
-        let style = self.input.style();
-        let mut x = footer.min.x + layout.area.min.x - screen.min.x;
-        for (button, label) in hints {
-            let chip = icons::button(painter, pos2(x, footer.center().y), button, style, &small);
-            let end = painter.text(
-                pos2(chip.max.x + 10.0, footer.center().y),
-                Align2::LEFT_CENTER,
-                label,
-                small.clone(),
-                theme::DIM,
-            );
-            x = end.max.x + 36.0;
-        }
-        // On the right: games waiting for Steam to restart, or the count.
-        let right = footer.max.x - (layout.area.min.x - screen.min.x);
-        if self.pending_count() > 0 {
-            let label = format!(
-                "{} {} · Start: {}",
-                self.pending_count(),
-                text.ready,
-                text.restart_steam
-            );
-            let galley = painter.layout_no_wrap(label, small.clone(), Color32::BLACK);
-            let rect = Rect::from_min_size(
-                pos2(
-                    right - galley.size().x - 32.0,
-                    footer.center().y - galley.size().y / 2.0 - 8.0,
-                ),
-                galley.size() + vec2(32.0, 16.0),
-            );
-            painter.rect_filled(rect, 20.0, theme::WAITING);
-            painter.galley(rect.min + vec2(16.0, 8.0), galley, Color32::BLACK);
-        } else {
-            painter.text(
-                pos2(right, footer.center().y),
-                Align2::RIGHT_CENTER,
-                format!("{} {}", self.visible.len(), text.results),
-                small,
-                theme::DIM,
-            );
         }
     }
 
@@ -1313,7 +1268,12 @@ impl App {
     fn draw_detail(&self, painter: &egui::Painter, screen: Rect, button: usize) {
         let Some(game) = self.current() else { return };
         let text = self.text;
-        painter.rect_filled(screen, 0.0, theme::BACKGROUND.gamma_multiply(0.97));
+        // Everything but the footer, which stays the same on every screen.
+        let body = Rect::from_min_max(
+            screen.min,
+            pos2(screen.max.x, screen.max.y - footer_height(screen)),
+        );
+        painter.rect_filled(body, 0.0, theme::BACKGROUND);
         let details = self.details.get(&game.id);
 
         let margin = screen.width() * 0.045;
@@ -1337,10 +1297,10 @@ impl App {
             &FontId::proportional(screen.height() * 0.025),
         );
 
-        // Right: the screenshots, as large as the screen allows.
-        let shot_width = screen.width() * 0.48;
-        let shot = Rect::from_min_size(
-            pos2(screen.max.x - margin - shot_width, top),
+        // Right: the screenshots, a column scrolled with up and down.
+        let shot_width = screen.width() * 0.44;
+        let shot = Rect::from_center_size(
+            pos2(screen.max.x - margin - shot_width / 2.0, body.center().y),
             vec2(shot_width, shot_width * 9.0 / 16.0),
         );
 
@@ -1456,20 +1416,51 @@ impl App {
             .x + 24.0;
         }
 
-        // Screenshots.
-        painter.rect_filled(shot, 14.0, theme::TRACK);
+        // Screenshots: the one in focus in the middle, its neighbours above and
+        // below, dimmed and cut by the screen's edges, so it reads as a column.
         let count = details.map_or(0, |details| details.screenshots.len());
-        match self.shots.get(&self.shot) {
-            Some(Some(texture)) => {
-                painter.image(
-                    texture.id(),
-                    shot,
-                    Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+        let column = Rect::from_min_max(
+            pos2(shot.min.x - 8.0, body.min.y),
+            pos2(shot.max.x + 8.0, body.max.y),
+        );
+        let clip = painter.with_clip_rect(column);
+        let step = shot.height() + screen.height() * 0.03;
+        let first = (self.shot_scroll.floor() as i64 - 2).max(0) as usize;
+        for index in first..count.min(first + 5) {
+            let offset = (index as f32 - self.shot_scroll) * step;
+            let rect = shot.translate(vec2(0.0, offset));
+            let focused = index == self.shot;
+            let tint = if focused {
+                Color32::WHITE
+            } else {
+                Color32::from_gray(90)
+            };
+            match self.shots.get(&index) {
+                Some(Some(texture)) => {
+                    clip.image(
+                        texture.id(),
+                        rect,
+                        Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                        tint,
+                    );
+                }
+                _ => {
+                    clip.rect_filled(rect, 14.0, theme::TRACK);
+                }
+            }
+            if focused && count > 1 {
+                clip.text(
+                    rect.right_bottom() + vec2(-16.0, -14.0),
+                    Align2::RIGHT_BOTTOM,
+                    format!("{}/{count}", index + 1),
+                    FontId::proportional(screen.height() * 0.024),
                     Color32::WHITE,
                 );
             }
-            _ if count == 0 && details.is_some() => {}
-            _ => {
+        }
+        if count == 0 {
+            painter.rect_filled(shot, 14.0, theme::TRACK);
+            if details.is_none() {
                 painter.text(
                     shot.center(),
                     Align2::CENTER_CENTER,
@@ -1479,36 +1470,100 @@ impl App {
                 );
             }
         }
+    }
+
+    /// The footer: the same bar on every screen, saying what the buttons do there.
+    fn draw_footer(&self, painter: &egui::Painter, screen: Rect) {
+        let text = self.text;
+        let footer = Rect::from_min_max(
+            pos2(screen.min.x, screen.max.y - footer_height(screen)),
+            screen.max,
+        );
+        painter.rect_filled(footer, 0.0, theme::PANEL);
         let small = FontId::proportional(screen.height() * 0.022);
+        let margin = (screen.width() * 0.035).max(24.0);
+
+        let details = self.current_details();
+        let hints: Vec<(&str, &str)> = if self.video_playing() {
+            vec![("B", text.stop_video)]
+        } else {
+            match self.screen {
+                Screen::Grid => {
+                    let mut hints = vec![
+                        ("A", text.select),
+                        ("Y", text.search),
+                        ("X", text.downloads),
+                        ("LB/RB", text.tabs),
+                        ("Start", text.menu),
+                    ];
+                    if !self.filter.is_empty() {
+                        hints.push(("B", text.back));
+                    }
+                    hints
+                }
+                Screen::Detail { .. } => {
+                    let mut hints = vec![("◀▶", text.options), ("A", text.accept)];
+                    if details.is_some_and(|d| d.screenshots.len() > 1) {
+                        hints.insert(1, ("▲▼", text.screenshots));
+                    }
+                    if details.is_some_and(|d| !d.videos.is_empty()) {
+                        hints.push(("Y", text.video));
+                    }
+                    hints.push(("B", text.back));
+                    hints
+                }
+                Screen::Keyboard => vec![
+                    ("A", text.type_key),
+                    ("X", text.delete),
+                    ("Y", text.space),
+                    ("B", text.done),
+                ],
+                Screen::Downloads => vec![("B", text.back)],
+                Screen::Menu { .. }
+                | Screen::ConfirmRestart { .. }
+                | Screen::ConfirmQuit { .. } => {
+                    vec![("A", text.accept), ("B", text.cancel)]
+                }
+            }
+        };
         let style = self.input.style();
-        let hint_y = shot.max.y + screen.height() * 0.035;
-        let mut x = shot.min.x;
-        if count > 1 {
-            let chip = icons::button(painter, pos2(x, hint_y), "LB/RB", style, &small);
+        let mut x = footer.min.x + margin;
+        for (button, label) in hints {
+            let chip = icons::button(painter, pos2(x, footer.center().y), button, style, &small);
             let end = painter.text(
-                pos2(chip.max.x + 10.0, hint_y),
+                pos2(chip.max.x + 10.0, footer.center().y),
                 Align2::LEFT_CENTER,
-                format!("{}  {}/{count}", text.screenshots, self.shot + 1),
+                label,
                 small.clone(),
                 theme::DIM,
             );
             x = end.max.x + 36.0;
         }
-        if details.is_some_and(|details| !details.videos.is_empty()) {
-            let chip = icons::button(painter, pos2(x, hint_y), "X", style, &small);
-            painter.text(
-                pos2(chip.max.x + 10.0, hint_y),
-                Align2::LEFT_CENTER,
-                text.video,
-                small.clone(),
-                theme::DIM,
+
+        // On the right: games waiting for Steam to restart, or the count.
+        let right = footer.max.x - margin;
+        if self.pending_count() > 0 {
+            let label = format!(
+                "{} {} · Start: {}",
+                self.pending_count(),
+                text.ready,
+                text.restart_steam
             );
-        }
-        if self.video_playing() {
+            let galley = painter.layout_no_wrap(label, small.clone(), Color32::BLACK);
+            let rect = Rect::from_min_size(
+                pos2(
+                    right - galley.size().x - 32.0,
+                    footer.center().y - galley.size().y / 2.0 - 8.0,
+                ),
+                galley.size() + vec2(32.0, 16.0),
+            );
+            painter.rect_filled(rect, 20.0, theme::WAITING);
+            painter.galley(rect.min + vec2(16.0, 8.0), galley, Color32::BLACK);
+        } else if self.screen == Screen::Grid {
             painter.text(
-                pos2(shot.center().x, shot.max.y + screen.height() * 0.08),
-                Align2::CENTER_CENTER,
-                text.stop_video,
+                pos2(right, footer.center().y),
+                Align2::RIGHT_CENTER,
+                format!("{} {}", self.visible.len(), text.results),
                 small,
                 theme::DIM,
             );
