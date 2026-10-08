@@ -20,7 +20,7 @@ use serde::Deserialize;
 
 use crate::catalog::ProductId;
 use crate::http::{Fetch, HttpClient};
-use crate::{Error, Result};
+use crate::{Error, Paths, Result};
 
 const STEAMGRIDDB: &str = "https://www.steamgriddb.com/api/v2";
 const GOG_CATALOG: &str = "https://catalog.gog.com/v1/catalog";
@@ -30,7 +30,7 @@ const GOG_CATALOG: &str = "https://catalog.gog.com/v1/catalog";
 const FILTERS: &str = "types=static&nsfw=false&humor=false";
 
 /// The four images Steam shows for a game.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Kind {
     Portrait,
     Wide,
@@ -40,6 +40,16 @@ pub enum Kind {
 
 impl Kind {
     pub const ALL: [Kind; 4] = [Kind::Portrait, Kind::Wide, Kind::Hero, Kind::Logo];
+
+    /// The kind's name where picked images are remembered.
+    pub fn name(self) -> &'static str {
+        match self {
+            Kind::Portrait => "portrait",
+            Kind::Wide => "wide",
+            Kind::Hero => "hero",
+            Kind::Logo => "logo",
+        }
+    }
 
     /// What follows the appid in the file name.
     pub fn suffix(self) -> &'static str {
@@ -88,6 +98,8 @@ struct SgdbGame {
 #[derive(Deserialize)]
 struct SgdbImage {
     url: String,
+    #[serde(default)]
+    thumb: String,
 }
 
 fn sgdb<H: HttpClient, T: serde::de::DeserializeOwned>(
@@ -138,6 +150,51 @@ fn sgdb_game<H: HttpClient>(
         .map(|game| game.id))
 }
 
+/// The SteamGridDB query for one kind, in the sizes Steam uses.
+fn kind_path(game: u64, kind: Kind) -> String {
+    match kind {
+        Kind::Portrait => format!("/grids/game/{game}?dimensions=600x900&{FILTERS}"),
+        Kind::Wide => format!("/grids/game/{game}?dimensions=920x430,460x215&{FILTERS}"),
+        Kind::Hero => format!("/heroes/game/{game}?{FILTERS}"),
+        Kind::Logo => format!("/logos/game/{game}?{FILTERS}"),
+    }
+}
+
+/// One image to choose from: the image itself and a small preview of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Choice {
+    pub url: String,
+    pub thumb: String,
+}
+
+/// Every image of `kind` SteamGridDB has for the game, best rated first, at most
+/// `limit` of them.
+pub fn choices<H: HttpClient>(
+    http: &H,
+    key: &str,
+    id: &ProductId,
+    title: &str,
+    kind: Kind,
+    limit: usize,
+) -> Result<Vec<Choice>> {
+    let Some(game) = sgdb_game(http, key, id, title)? else {
+        return Ok(Vec::new());
+    };
+    let images: Vec<SgdbImage> = sgdb(http, key, &kind_path(game, kind))?.unwrap_or_default();
+    Ok(images
+        .into_iter()
+        .take(limit)
+        .map(|image| Choice {
+            thumb: if image.thumb.is_empty() {
+                image.url.clone()
+            } else {
+                image.thumb
+            },
+            url: image.url,
+        })
+        .collect())
+}
+
 /// The best-rated image of each kind on SteamGridDB, in the sizes Steam uses.
 pub fn steamgriddb<H: HttpClient>(
     http: &H,
@@ -150,13 +207,7 @@ pub fn steamgriddb<H: HttpClient>(
     };
     let mut arts = Vec::new();
     for kind in Kind::ALL {
-        let path = match kind {
-            Kind::Portrait => format!("/grids/game/{game}?dimensions=600x900&{FILTERS}"),
-            Kind::Wide => format!("/grids/game/{game}?dimensions=920x430,460x215&{FILTERS}"),
-            Kind::Hero => format!("/heroes/game/{game}?{FILTERS}"),
-            Kind::Logo => format!("/logos/game/{game}?{FILTERS}"),
-        };
-        let images: Vec<SgdbImage> = sgdb(http, key, &path)?.unwrap_or_default();
+        let images: Vec<SgdbImage> = sgdb(http, key, &kind_path(game, kind))?.unwrap_or_default();
         if let Some(image) = images.into_iter().next() {
             arts.push(Art {
                 kind,
@@ -211,6 +262,46 @@ pub fn gog<H: HttpClient>(http: &H, id: &ProductId, title: &str) -> Result<Vec<A
             .map(|url| Art { kind, url })
     })
     .collect())
+}
+
+/// Where the images someone picked for a game are remembered, so reinstalling it
+/// keeps them instead of going back to SteamGridDB's favourites.
+fn chosen_file(paths: &Paths, id: &ProductId) -> PathBuf {
+    paths.data_dir.join("artwork").join(format!("{id}.json"))
+}
+
+/// The images picked for a game, one per kind at most.
+pub fn chosen(paths: &Paths, id: &ProductId) -> Vec<Art> {
+    let Ok(text) = std::fs::read_to_string(chosen_file(paths, id)) else {
+        return Vec::new();
+    };
+    let picked: std::collections::BTreeMap<String, String> =
+        serde_json::from_str(&text).unwrap_or_default();
+    Kind::ALL
+        .into_iter()
+        .filter_map(|kind| {
+            picked.get(kind.name()).map(|url| Art {
+                kind,
+                url: url.clone(),
+            })
+        })
+        .collect()
+}
+
+/// Remember `art` as the game's image of its kind.
+pub fn remember(paths: &Paths, id: &ProductId, art: &Art) -> Result<()> {
+    let mut picked: std::collections::BTreeMap<String, String> = chosen(paths, id)
+        .into_iter()
+        .map(|art| (art.kind.name().to_string(), art.url))
+        .collect();
+    picked.insert(art.kind.name().to_string(), art.url.clone());
+    let file = chosen_file(paths, id);
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir)
+            .map_err(|error| Error::io(format!("creating {}", dir.display()), error))?;
+    }
+    let text = serde_json::to_string_pretty(&picked).expect("a map of strings serialises");
+    crate::atomic::write(&file, text.as_bytes(), crate::atomic::Access::Default)
 }
 
 /// Download each image once and write it into every grid directory, replacing
@@ -352,6 +443,50 @@ mod tests {
         let arts = gog(&http, &"1955095293".into(), "Xeno Crisis").unwrap();
         assert_eq!(arts[0].file_name(7), "7.png");
         assert_eq!(arts[1].file_name(7), "7p.jpg");
+    }
+
+    #[test]
+    fn choices_come_with_their_previews_and_picks_are_remembered() {
+        let http = Fake(HashMap::from([
+            ("/games/gog/1955095293", (200, BY_GOG_ID)),
+            ("/grids/game/5249018?dimensions=600x900", (200, PORTRAITS)),
+        ]));
+        let found = choices(
+            &http,
+            "key",
+            &"1955095293".into(),
+            "Xeno Crisis",
+            Kind::Portrait,
+            10,
+        )
+        .unwrap();
+        assert_eq!(found.len(), 1);
+        assert!(found[0].thumb.contains("/thumb/"));
+
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            config_dir: temp.path().join("c"),
+            data_dir: temp.path().join("d"),
+            cache_dir: temp.path().join("k"),
+        };
+        let id: ProductId = "7".into();
+        assert!(chosen(&paths, &id).is_empty());
+        for url in ["https://a/1.png", "https://a/2.png"] {
+            let art = Art {
+                kind: Kind::Portrait,
+                url: url.to_string(),
+            };
+            remember(&paths, &id, &art).unwrap();
+        }
+        let hero = Art {
+            kind: Kind::Hero,
+            url: "https://a/h.jpg".to_string(),
+        };
+        remember(&paths, &id, &hero).unwrap();
+        let picked = chosen(&paths, &id);
+        assert_eq!(picked.len(), 2);
+        assert_eq!(picked[0].url, "https://a/2.png");
+        assert_eq!(picked[1], hero);
     }
 
     struct Images;

@@ -553,10 +553,17 @@ fn fetch_art(
     appid: u32,
     users: &[SteamUser],
 ) -> Result<usize> {
-    let mut arts = match context.config.steamgriddb.api_key.as_deref() {
-        Some(key) => artwork::steamgriddb(http, key, &game.id, &game.title)?,
-        None => Vec::new(),
-    };
+    // What was picked by hand first; SteamGridDB's favourites for the rest.
+    let mut arts = artwork::chosen(context.paths, &game.id);
+    if arts.len() < artwork::Kind::ALL.len()
+        && let Some(key) = context.config.steamgriddb.api_key.as_deref()
+    {
+        for art in artwork::steamgriddb(http, key, &game.id, &game.title)? {
+            if !arts.iter().any(|known| known.kind == art.kind) {
+                arts.push(art);
+            }
+        }
+    }
     // GOG fills in only the kinds SteamGridDB had nothing for.
     if arts.len() < artwork::Kind::ALL.len() {
         for art in artwork::gog(http, &game.id, &game.title).unwrap_or_default() {

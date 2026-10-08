@@ -94,6 +94,37 @@ pub fn button(
     };
     let galley = painter.layout_no_wrap(label.to_string(), font.clone(), Color32::BLACK);
     let height = galley.size().y + 8.0;
+    // Arrows are drawn: the UI font has ◀▶ but not ▲▼, and a missing glyph
+    // shows as an empty box.
+    let arrows: Option<[f32; 2]> = match label {
+        "◀▶" => Some([180.0, 0.0]),
+        "▲▼" => Some([270.0, 90.0]),
+        _ => None,
+    };
+    if let Some(angles) = arrows {
+        let size = height * 0.42;
+        let rect = Rect::from_min_size(
+            pos2(left_center.x, left_center.y - height / 2.0),
+            vec2(size * 2.0 + 30.0, height),
+        );
+        painter.rect_filled(rect, 8.0, Color32::from_rgb(236, 236, 242));
+        for (index, angle) in angles.iter().enumerate() {
+            let center = pos2(
+                rect.min.x + 12.0 + size / 2.0 + index as f32 * (size + 6.0),
+                rect.center().y,
+            );
+            let (sin, cos) = angle.to_radians().sin_cos();
+            let point = |forward: f32, side: f32| {
+                center + vec2(cos * forward - sin * side, sin * forward + cos * side) * size / 2.0
+            };
+            painter.add(egui::Shape::convex_polygon(
+                vec![point(1.0, 0.0), point(-0.8, 0.95), point(-0.8, -0.95)],
+                Color32::BLACK,
+                Stroke::NONE,
+            ));
+        }
+        return rect;
+    }
     match face {
         Some(colour) => {
             // A round face button, in the controller's colour.

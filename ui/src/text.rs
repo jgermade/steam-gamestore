@@ -55,6 +55,20 @@ pub struct Text {
     pub in_steam_after_restart: &'static str,
     pub version: &'static str,
     pub no_unit: &'static str,
+    pub artwork: &'static str,
+    pub art_portrait: &'static str,
+    pub art_wide: &'static str,
+    pub art_hero: &'static str,
+    pub art_logo: &'static str,
+    pub art_kinds: &'static str,
+    pub art_pick: &'static str,
+    pub art_loading: &'static str,
+    pub art_none: &'static str,
+    pub art_needs_key: &'static str,
+    pub art_current: &'static str,
+    pub art_saved: &'static str,
+    pub art_saved_store: &'static str,
+    pub art_failed: &'static str,
 }
 
 const EN: Text = Text {
@@ -113,6 +127,20 @@ const EN: Text = Text {
     in_steam_after_restart: "It appears in the Steam library after Steam restarts.",
     version: "Version",
     no_unit: "Close Steam and run `gamestore steam-apply` to add the new games.",
+    artwork: "Artwork",
+    art_portrait: "Cover",
+    art_wide: "Wide",
+    art_hero: "Background",
+    art_logo: "Logo",
+    art_kinds: "Kind",
+    art_pick: "Use this one",
+    art_loading: "Looking on SteamGridDB…",
+    art_none: "SteamGridDB has none of this kind for this game.",
+    art_needs_key: "Choosing artwork needs a SteamGridDB key: [steamgriddb] api_key in config.toml",
+    art_current: "In use",
+    art_saved: "Artwork changed. Steam shows it after it restarts.",
+    art_saved_store: "Artwork changed. It goes to Steam when the game is installed.",
+    art_failed: "The artwork could not be changed",
 };
 
 const ES: Text = Text {
@@ -171,6 +199,20 @@ const ES: Text = Text {
     in_steam_after_restart: "Aparecerá en la biblioteca de Steam cuando reinicies Steam.",
     version: "Versión",
     no_unit: "Cierra Steam y ejecuta `gamestore steam-apply` para añadir los juegos nuevos.",
+    artwork: "Carátulas",
+    art_portrait: "Portada",
+    art_wide: "Horizontal",
+    art_hero: "Fondo",
+    art_logo: "Logo",
+    art_kinds: "Tipo",
+    art_pick: "Usar esta",
+    art_loading: "Buscando en SteamGridDB…",
+    art_none: "SteamGridDB no tiene ninguna de este tipo para este juego.",
+    art_needs_key: "Para elegir carátulas hace falta una clave de SteamGridDB: [steamgriddb] api_key en config.toml",
+    art_current: "En uso",
+    art_saved: "Carátula cambiada. Steam la mostrará cuando se reinicie.",
+    art_saved_store: "Carátula cambiada. Irá a Steam cuando instales el juego.",
+    art_failed: "No se ha podido cambiar la carátula",
 };
 
 /// The text for the system language: Spanish for any `es*` locale.

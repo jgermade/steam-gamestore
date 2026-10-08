@@ -13,6 +13,7 @@ use eframe::egui::{
     self, Align2, Color32, FontId, Pos2, Rect, Stroke, StrokeKind, TextureHandle, TextureOptions,
     Vec2, pos2, text::LayoutJob, vec2,
 };
+use gamestore_core::artwork::{Art, Choice, Kind};
 use gamestore_core::catalog::{Game, Os, ProductId};
 use gamestore_core::details::{Details, Storage, human_size};
 use gamestore_core::registry::{Registry, State};
@@ -22,7 +23,7 @@ use crate::covers::{self, Covers};
 use crate::icons;
 use crate::input::{Input, Nav};
 use crate::jobs::{Jobs, Machine, Progress};
-use crate::media::{Answer, Media};
+use crate::media::{Answer, Apply, Media};
 use crate::osk::{self, Keyboard};
 use crate::text::Text;
 use crate::theme;
@@ -35,6 +36,8 @@ struct Known {
     install_path: Option<String>,
     build: Option<String>,
     platform: Option<Os>,
+    /// The game's Steam tile.
+    appid: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +65,42 @@ enum Screen {
     Menu {
         button: usize,
     },
+    /// Choosing the focused game's artwork from SteamGridDB.
+    Art,
+}
+
+/// The artwork picker's state: one kind at a time, its images in a row.
+struct Picker {
+    id: ProductId,
+    /// Index into [`Kind::ALL`].
+    kind: usize,
+    /// What SteamGridDB has of each kind, once asked.
+    choices: HashMap<Kind, Result<Vec<Choice>, String>>,
+    previews: HashMap<(Kind, usize), Option<TextureHandle>>,
+    asked: HashSet<(Kind, usize)>,
+    /// The image in focus for each kind.
+    focus: HashMap<Kind, usize>,
+    /// The images picked so far, by URL.
+    picked: HashMap<Kind, String>,
+    /// Being put in place: its kind and address.
+    applying: Option<(Kind, String)>,
+}
+
+impl Picker {
+    fn kind(&self) -> Kind {
+        Kind::ALL[self.kind]
+    }
+
+    fn focused(&self) -> usize {
+        self.focus.get(&self.kind()).copied().unwrap_or(0)
+    }
+
+    fn count(&self) -> usize {
+        self.choices
+            .get(&self.kind())
+            .and_then(|found| found.as_ref().ok())
+            .map_or(0, Vec::len)
+    }
 }
 
 pub struct App {
@@ -105,6 +144,12 @@ pub struct App {
     loaded_at: Instant,
     pending: usize,
     notice: Option<(String, Instant)>,
+    picker: Option<Picker>,
+    /// The row in focus in the downloads panel.
+    downloads_focus: usize,
+    /// The grid's focused game and since when, to fetch its details before it
+    /// is opened.
+    dwell: Option<(ProductId, Instant)>,
 }
 
 impl App {
@@ -159,6 +204,9 @@ impl App {
             loaded_at: Instant::now() - Duration::from_secs(60),
             pending: 0,
             notice: None,
+            picker: None,
+            downloads_focus: 0,
+            dwell: None,
         };
         app.reload();
         app.refilter();
@@ -184,6 +232,7 @@ impl App {
                                 .map(|path| path.display().to_string()),
                             build: entry.build.clone().filter(|build| !build.is_empty()),
                             platform: entry.platform,
+                            appid: entry.steam_appid,
                         },
                     )
                 })
@@ -238,9 +287,12 @@ impl App {
     }
 
     fn start_install(&mut self, os: Os) {
-        let Some(game) = self.current().cloned() else {
-            return;
-        };
+        if let Some(game) = self.current().cloned() {
+            self.install_game(game, os);
+        }
+    }
+
+    fn install_game(&mut self, game: Game, os: Os) {
         if !install::builds(&game).contains(&os) {
             return;
         }
@@ -250,6 +302,142 @@ impl App {
         self.progress.insert(game.id.clone(), Progress::Queued);
         self.building.insert(game.id.clone(), os);
         self.jobs.install(game, os);
+    }
+
+    /// The downloads panel's rows: working ones first, in the order they will
+    /// run; then failures, which can be retried; then what finished.
+    fn download_rows(&self) -> Vec<(&Game, &Progress)> {
+        let mut rows: Vec<(&Game, &Progress)> = self
+            .games
+            .iter()
+            .filter_map(|game| self.progress.get(&game.id).map(|progress| (game, progress)))
+            .collect();
+        rows.sort_by_key(|(_, progress)| match progress {
+            Progress::Downloading { .. } | Progress::Installing | Progress::Finishing => 0,
+            Progress::Queued => 1,
+            Progress::Failed(_) => 2,
+            Progress::Done { .. } => 3,
+        });
+        rows
+    }
+
+    /// The failed install in focus in the downloads panel, with the build to retry.
+    fn focused_failure(&self) -> Option<(Game, Os)> {
+        let (game, progress) = self.download_rows().get(self.downloads_focus).copied()?;
+        if !matches!(progress, Progress::Failed(_)) {
+            return None;
+        }
+        let os = self
+            .building
+            .get(&game.id)
+            .copied()
+            .or_else(|| install::preferred(game))?;
+        Some((game.clone(), os))
+    }
+
+    /// The build a retry of `game` installs: the one that failed this session,
+    /// else the only one there is.
+    fn retry_build(&self, game: &Game) -> Option<Os> {
+        self.failure(&game.id)?;
+        self.building.get(&game.id).copied().or_else(|| {
+            let builds = install::builds(game);
+            (builds.len() == 1).then(|| builds[0])
+        })
+    }
+
+    /// Open the artwork picker for the focused game, asking SteamGridDB for every
+    /// kind at once.
+    fn open_art(&mut self) {
+        let Some(game) = self.current().cloned() else {
+            return;
+        };
+        if self.machine.config.steamgriddb.api_key.is_none() {
+            self.notify(self.text.art_needs_key);
+            return;
+        }
+        let picked = gamestore_core::artwork::chosen(&self.machine.paths, &game.id)
+            .into_iter()
+            .map(|art| (art.kind, art.url))
+            .collect();
+        let reuse = self
+            .picker
+            .as_ref()
+            .is_some_and(|picker| picker.id == game.id);
+        if !reuse {
+            for kind in Kind::ALL {
+                self.media
+                    .choices(game.id.clone(), game.title.clone(), kind);
+            }
+            self.picker = Some(Picker {
+                id: game.id.clone(),
+                kind: 0,
+                choices: HashMap::new(),
+                previews: HashMap::new(),
+                asked: HashSet::new(),
+                focus: HashMap::new(),
+                picked,
+                applying: None,
+            });
+        }
+        self.screen = Screen::Art;
+    }
+
+    /// Ask for the previews around the focused one, once each.
+    fn want_previews(&mut self) {
+        let Some(picker) = self.picker.as_mut() else {
+            return;
+        };
+        let kind = picker.kind();
+        let Some(Ok(found)) = picker.choices.get(&kind) else {
+            return;
+        };
+        let focused = picker.focused();
+        let wanted: Vec<(usize, String)> = (focused.saturating_sub(3)
+            ..(focused + 6).min(found.len()))
+            .map(|index| (index, found[index].thumb.clone()))
+            .collect();
+        for (index, url) in wanted {
+            if picker.asked.insert((kind, index)) {
+                self.media.preview(picker.id.clone(), kind, index, url);
+            }
+        }
+    }
+
+    fn handle_art(&mut self, nav: Nav) {
+        let Some(picker) = self.picker.as_mut() else {
+            self.screen = Screen::Grid;
+            return;
+        };
+        let count = picker.count();
+        let kind = picker.kind();
+        match nav {
+            Nav::Left => {
+                let focus = picker.focus.entry(kind).or_insert(0);
+                *focus = focus.saturating_sub(1);
+            }
+            Nav::Right => {
+                let focus = picker.focus.entry(kind).or_insert(0);
+                *focus = (*focus + 1).min(count.saturating_sub(1));
+            }
+            Nav::Up | Nav::Previous => picker.kind = picker.kind.saturating_sub(1),
+            Nav::Down | Nav::Next => picker.kind = (picker.kind + 1).min(Kind::ALL.len() - 1),
+            Nav::Accept if picker.applying.is_none() && count > 0 => {
+                let Some(Ok(found)) = picker.choices.get(&kind) else {
+                    return;
+                };
+                let url = found[picker.focused()].url.clone();
+                picker.applying = Some((kind, url.clone()));
+                let id = picker.id.clone();
+                let appid = self.known.get(&id).and_then(|known| known.appid);
+                self.media.apply(Apply {
+                    id,
+                    art: Art { kind, url },
+                    appid,
+                });
+            }
+            Nav::Back => self.screen = Screen::Detail { button: 0 },
+            _ => {}
+        }
     }
 
     fn current_details(&self) -> Option<&Details> {
@@ -285,6 +473,7 @@ impl App {
 
     fn open_downloads(&mut self) {
         self.screen = Screen::Downloads;
+        self.downloads_focus = 0;
         let stale = self
             .storage_asked
             .is_none_or(|at| at.elapsed() > Duration::from_secs(30));
@@ -307,7 +496,8 @@ impl App {
         };
         let count = details.screenshots.len();
         let previous = (self.shot + count.max(1) - 1) % count.max(1);
-        for index in [self.shot, (self.shot + 1) % count.max(1), previous] {
+        let next = |step: usize| (self.shot + step) % count.max(1);
+        for index in [self.shot, next(1), next(2), previous] {
             if index < count && self.shots_asked.insert(index) {
                 self.media.screenshot(
                     game.id.clone(),
@@ -441,6 +631,7 @@ impl App {
                         Some(DetailAction::Restart) => {
                             self.screen = Screen::ConfirmRestart { button: 0 }
                         }
+                        Some(DetailAction::Art) => self.open_art(),
                         Some(DetailAction::Back) | None => self.screen = Screen::Grid,
                     },
                     // The screenshots run top to bottom, so up and down go through
@@ -471,10 +662,23 @@ impl App {
                 _ => {}
             },
             Screen::Downloads => {
-                if matches!(nav, Nav::Back | Nav::Accept | Nav::Action) {
-                    self.screen = Screen::Grid;
+                let rows = self.download_rows().len();
+                match nav {
+                    Nav::Up => self.downloads_focus = self.downloads_focus.saturating_sub(1),
+                    Nav::Down => {
+                        self.downloads_focus =
+                            (self.downloads_focus + 1).min(rows.saturating_sub(1))
+                    }
+                    Nav::Accept => {
+                        if let Some((game, os)) = self.focused_failure() {
+                            self.install_game(game, os);
+                        }
+                    }
+                    Nav::Back | Nav::Action => self.screen = Screen::Grid,
+                    _ => {}
                 }
             }
+            Screen::Art => self.handle_art(nav),
             Screen::Menu { button } => match nav {
                 Nav::Up | Nav::Left => {
                     self.screen = Screen::Menu {
@@ -554,10 +758,10 @@ impl App {
         };
         let progress = self.progress.get(&game.id);
         if progress.is_some_and(|p| matches!(p, Progress::Done { pending: true })) {
-            return vec![DetailAction::Restart, DetailAction::Back];
+            return vec![DetailAction::Restart, DetailAction::Art, DetailAction::Back];
         }
         if progress.is_some_and(Progress::active) {
-            return vec![DetailAction::Back];
+            return vec![DetailAction::Art, DetailAction::Back];
         }
         let builds = install::builds(game);
         let mut actions: Vec<DetailAction> = if self.installed(&game.id) {
@@ -569,8 +773,13 @@ impl App {
                 .map(DetailAction::Switch)
                 .collect()
         } else {
+            // A failed build first, so A on the first button retries it.
+            let retry = self.retry_build(game);
+            let mut builds = builds;
+            builds.sort_by_key(|os| Some(*os) != retry);
             builds.into_iter().map(DetailAction::Install).collect()
         };
+        actions.push(DetailAction::Art);
         actions.push(DetailAction::Back);
         actions
     }
@@ -627,6 +836,8 @@ enum DetailAction {
     /// Install the other build of an installed game; its tile replaces the old one.
     Switch(Os),
     Restart,
+    /// Choose the game's artwork.
+    Art,
     Back,
 }
 
@@ -670,6 +881,70 @@ impl eframe::App for App {
                     self.disk.insert(id, bytes);
                 }
                 Answer::Storage(storage) => self.storage = Some(storage),
+                Answer::Choices(id, kind, found) => {
+                    if let Some(picker) = self.picker.as_mut().filter(|p| p.id == id) {
+                        picker.choices.insert(kind, found);
+                    }
+                }
+                Answer::Preview(id, kind, index, image) => {
+                    if let Some(picker) = self.picker.as_mut().filter(|p| p.id == id) {
+                        let texture = image.map(|image| {
+                            ctx.load_texture(
+                                format!("{id}-art-{kind:?}-{index}"),
+                                image,
+                                TextureOptions::LINEAR,
+                            )
+                        });
+                        picker.previews.insert((kind, index), texture);
+                    }
+                }
+                Answer::Applied(id, kind, result) => {
+                    let url = self
+                        .picker
+                        .as_mut()
+                        .filter(|picker| picker.id == id)
+                        .and_then(|picker| picker.applying.take())
+                        .map(|(_, url)| url);
+                    match result {
+                        Ok(cover) => {
+                            if let (Some(picker), Some(url)) = (self.picker.as_mut(), url) {
+                                picker.picked.insert(kind, url);
+                            }
+                            if let Some(cover) = cover {
+                                let texture =
+                                    ctx.load_texture(id.to_string(), cover, TextureOptions::LINEAR);
+                                self.textures.insert(id.clone(), Some(texture));
+                            }
+                            let has_tile = self.known.get(&id).is_some_and(|k| k.appid.is_some());
+                            self.notify(if has_tile {
+                                self.text.art_saved
+                            } else {
+                                self.text.art_saved_store
+                            });
+                        }
+                        Err(error) => {
+                            self.notify(format!("{}: {error}", self.text.art_failed));
+                        }
+                    }
+                }
+            }
+        }
+        if self.screen == Screen::Art {
+            self.want_previews();
+        }
+        // A cover looked at for a moment is likely to be opened: fetch its
+        // details now, so the detail view has them when it opens.
+        if self.screen == Screen::Grid
+            && let Some(id) = self.current().map(|game| game.id.clone())
+        {
+            match &self.dwell {
+                Some((dwelling, since)) if *dwelling == id => {
+                    if since.elapsed() > Duration::from_millis(400) && self.asked.insert(id.clone())
+                    {
+                        self.media.details(id);
+                    }
+                }
+                _ => self.dwell = Some((id, Instant::now())),
             }
         }
         if matches!(self.screen, Screen::Detail { .. }) {
@@ -745,6 +1020,7 @@ impl eframe::App for App {
                 )
             }
             Screen::Downloads => self.draw_downloads(&painter, screen),
+            Screen::Art => self.draw_art(&painter, screen),
             Screen::Menu { button } => {
                 let text = self.text;
                 draw_menu(
@@ -1129,18 +1405,7 @@ impl App {
             theme::TEXT,
         );
 
-        // Working ones first, in the order they will run; then what finished.
-        let mut rows: Vec<(&Game, &Progress)> = self
-            .games
-            .iter()
-            .filter_map(|game| self.progress.get(&game.id).map(|progress| (game, progress)))
-            .collect();
-        rows.sort_by_key(|(_, progress)| match progress {
-            Progress::Downloading { .. } | Progress::Installing | Progress::Finishing => 0,
-            Progress::Queued => 1,
-            Progress::Failed(_) => 2,
-            Progress::Done { .. } => 3,
-        });
+        let rows = self.download_rows();
         let top = list_top + screen.height() * 0.06;
         if rows.is_empty() {
             painter.text(
@@ -1154,14 +1419,23 @@ impl App {
         }
         let row_height = screen.height() * 0.105;
         let time = painter.ctx().input(|input| input.time) as f32;
-        for (index, (game, progress)) in rows.iter().enumerate() {
-            let y = top + index as f32 * row_height;
-            if y + row_height > inner.max.y {
-                break;
-            }
+        // Scrolled so the focused row is always in view.
+        let fits = (((inner.max.y - top) / row_height).floor() as usize).max(1);
+        let first = (self.downloads_focus + 1).saturating_sub(fits);
+        for (index, (game, progress)) in rows.iter().enumerate().skip(first).take(fits) {
+            let y = top + (index - first) as f32 * row_height;
             let row =
                 Rect::from_min_size(pos2(inner.min.x, y), vec2(inner.width(), row_height * 0.88));
             painter.rect_filled(row, 12.0, theme::BACKGROUND);
+            let focused = index == self.downloads_focus;
+            if focused {
+                painter.rect_stroke(
+                    row,
+                    12.0,
+                    Stroke::new(3.0, theme::ACCENT),
+                    StrokeKind::Outside,
+                );
+            }
 
             // The cover, small, so the row is recognised before it is read.
             let cover_height = row.height() - 16.0;
@@ -1214,11 +1488,34 @@ impl App {
                 colour,
             );
             if let Progress::Failed(reason) = progress {
+                // On the focused failure, how to try again, at the row's right.
+                let mut reason_right = row.max.x - 20.0;
+                if focused {
+                    let style = self.input.style();
+                    let at = pos2(row.max.x - 20.0, row.max.y - 24.0);
+                    let label =
+                        painter.layout_no_wrap(text.retry.to_string(), small.clone(), theme::TEXT);
+                    let label_left = at.x - label.size().x;
+                    painter.galley(
+                        pos2(label_left, at.y - label.size().y / 2.0),
+                        label,
+                        theme::TEXT,
+                    );
+                    let chip_width = small.size + 8.0;
+                    let chip = icons::button(
+                        painter,
+                        pos2(label_left - 10.0 - chip_width, at.y),
+                        "A",
+                        style,
+                        &small,
+                    );
+                    reason_right = chip.min.x - 20.0;
+                }
                 let mut job = LayoutJob::simple(
                     reason.clone(),
                     small.clone(),
                     theme::FAILED,
-                    row.max.x - left - 20.0,
+                    reason_right - left,
                 );
                 job.wrap.max_rows = 1;
                 job.wrap.overflow_character = Some('…');
@@ -1277,9 +1574,19 @@ impl App {
         let details = self.details.get(&game.id);
 
         let margin = screen.width() * 0.045;
+        let gap = margin * 0.6;
         let top = screen.min.y + screen.height() * 0.08;
 
-        // Left: the cover. Middle: what the game is and what can be done.
+        // Right: the screenshots, a column scrolled with up and down. Everything
+        // else stays left of it, clipped there, so nothing ever runs under it.
+        let shot_width = screen.width() * 0.40;
+        let shot = Rect::from_center_size(
+            pos2(screen.max.x - margin - shot_width / 2.0, body.center().y),
+            vec2(shot_width, shot_width * 9.0 / 16.0),
+        );
+        let column_left = shot.min.x - gap;
+
+        // Left: the cover. Middle: what the game is.
         let cover_height = screen.height() * 0.5;
         let cover = Rect::from_min_size(
             pos2(screen.min.x + margin, top),
@@ -1297,102 +1604,111 @@ impl App {
             &FontId::proportional(screen.height() * 0.025),
         );
 
-        // Right: the screenshots, a column scrolled with up and down.
-        let shot_width = screen.width() * 0.44;
-        let shot = Rect::from_center_size(
-            pos2(screen.max.x - margin - shot_width / 2.0, body.center().y),
-            vec2(shot_width, shot_width * 9.0 / 16.0),
-        );
-
-        let left = cover.max.x + margin * 0.6;
-        let width = shot.min.x - margin * 0.6 - left;
+        let left = cover.max.x + gap;
+        let width = (column_left - left).max(1.0);
+        let info = painter.with_clip_rect(Rect::from_min_max(
+            pos2(left, body.min.y),
+            pos2(column_left, cover.max.y),
+        ));
         let mut y = top;
-        let write = |message: String, size: f32, colour: Color32, y: &mut f32| {
+        let write = |message: String, size: f32, colour: Color32, rows: usize, y: &mut f32| {
             let mut job = LayoutJob::simple(
                 message,
                 FontId::proportional(screen.height() * size),
                 colour,
                 width,
             );
-            job.wrap.max_rows = 4;
-            let galley = painter.layout_job(job);
+            job.wrap.max_rows = rows;
+            job.wrap.overflow_character = Some('…');
+            let galley = info.layout_job(job);
             let height = galley.size().y;
-            painter.galley(pos2(left, *y), galley, colour);
+            info.galley(pos2(left, *y), galley, colour);
             *y += height + screen.height() * 0.016;
         };
 
-        write(game.title.clone(), 0.048, theme::TEXT, &mut y);
+        write(game.title.clone(), 0.046, theme::TEXT, 3, &mut y);
         let known = self.known.get(&game.id).cloned().unwrap_or_default();
         if let Some((label, colour)) = self.badge(&game.id) {
-            write(label, 0.03, colour, &mut y);
+            write(label, 0.03, colour, 1, &mut y);
         }
 
-        // Each build GOG has, with its icon and download size.
+        // Each build GOG has, with its icon and sizes, wrapped to the space there is.
         let line = screen.height() * 0.03;
         for os in install::builds(game) {
             let icon = Rect::from_min_size(pos2(left, y), vec2(line, line));
-            icons::os(painter, icon, os);
-            let size = details
-                .and_then(|details| details.size(os))
-                .map(|bytes| format!("{} {}", text.download_size, human_size(bytes)))
-                .unwrap_or_default();
+            icons::os(&info, icon, os);
             let installed_here =
                 self.installed(&game.id) && known.platform.unwrap_or(Os::Windows) == os;
             let name = match os {
                 Os::Linux => text.linux_build,
                 _ => text.windows_build,
             };
-            let mut description = format!("{name}  ·  {size}");
+            let mut description = name.to_string();
+            if let Some(bytes) = details.and_then(|details| details.size(os)) {
+                description.push_str(&format!("\n{} {}", text.download_size, human_size(bytes)));
+            }
             if installed_here && let Some(bytes) = self.disk.get(&game.id) {
                 description.push_str(&format!("  ·  {} {}", text.on_disk, human_size(*bytes)));
             }
-            painter.text(
-                pos2(icon.max.x + 14.0, icon.center().y),
-                Align2::LEFT_CENTER,
+            let colour = if installed_here {
+                theme::TEXT
+            } else {
+                theme::DIM
+            };
+            let text_left = icon.max.x + 14.0;
+            let mut job = LayoutJob::simple(
                 description,
-                FontId::proportional(screen.height() * 0.024),
-                if installed_here {
-                    theme::TEXT
-                } else {
-                    theme::DIM
-                },
+                FontId::proportional(screen.height() * 0.023),
+                colour,
+                (column_left - text_left).max(1.0),
             );
-            y += line + screen.height() * 0.016;
+            job.wrap.max_rows = 3;
+            let galley = info.layout_job(job);
+            let height = galley.size().y.max(line);
+            info.galley(pos2(text_left, y), galley, colour);
+            y += height + screen.height() * 0.016;
         }
 
         if let Some(Progress::Done { pending: true }) = self.progress.get(&game.id) {
             write(
                 text.in_steam_after_restart.to_string(),
-                0.026,
+                0.024,
                 theme::TEXT,
+                2,
                 &mut y,
             );
         } else if self.installed(&game.id) {
-            write(text.play_in_steam.to_string(), 0.026, theme::TEXT, &mut y);
+            write(
+                text.play_in_steam.to_string(),
+                0.024,
+                theme::TEXT,
+                2,
+                &mut y,
+            );
             if let Some(build) = &known.build {
                 write(
                     format!("{}: {build}", text.version),
-                    0.022,
+                    0.021,
                     theme::DIM,
+                    1,
                     &mut y,
                 );
             }
         }
         if let Some(reason) = self.failure(&game.id) {
-            write(reason, 0.022, theme::FAILED, &mut y);
+            write(reason, 0.021, theme::FAILED, 3, &mut y);
         }
 
-        // The actions, under the cover's bottom edge.
-        let font = FontId::proportional(screen.height() * 0.032);
+        // The actions, under the cover, wrapping onto a second row rather than
+        // running under the screenshots.
+        let font = FontId::proportional(screen.height() * 0.03);
+        let retry = self.retry_build(game);
         let mut x = cover.min.x;
-        let buttons_y = cover.max.y + screen.height() * 0.05;
+        let mut row_y = cover.max.y + screen.height() * 0.045;
+        let row_gap = 20.0;
         for (index, action) in self.detail_buttons().iter().enumerate() {
             let (label, icon) = match action {
-                DetailAction::Install(os)
-                    if self.failure(&game.id).is_some() && install::builds(game).len() == 1 =>
-                {
-                    (text.retry, Some(*os))
-                }
+                DetailAction::Install(os) if retry == Some(*os) => (text.retry, Some(*os)),
                 DetailAction::Install(os) => (text.install, Some(*os)),
                 DetailAction::Switch(os) => (
                     match os {
@@ -1402,18 +1718,18 @@ impl App {
                     Some(*os),
                 ),
                 DetailAction::Restart => (text.restart_steam, None),
+                DetailAction::Art => (text.artwork, None),
                 DetailAction::Back => (text.back, None),
             };
-            x = draw_button(
-                painter,
-                pos2(x, buttons_y),
-                label,
-                icon,
-                &font,
-                index == button,
-            )
-            .max
-            .x + 24.0;
+            let size = button_size(painter, label, icon, &font);
+            if x > cover.min.x && x + size.x > column_left {
+                x = cover.min.x;
+                row_y += size.y + row_gap;
+            }
+            x = draw_button(painter, pos2(x, row_y), label, icon, &font, index == button)
+                .max
+                .x
+                + 24.0;
         }
 
         // Screenshots: the one in focus in the middle, its neighbours above and
@@ -1472,6 +1788,161 @@ impl App {
         }
     }
 
+    /// The artwork picker: the kinds as tabs, the images of one kind in a row,
+    /// the focused one in the middle.
+    fn draw_art(&self, painter: &egui::Painter, screen: Rect) {
+        let Some(picker) = &self.picker else { return };
+        let Some(game) = self.games.iter().find(|game| game.id == picker.id) else {
+            return;
+        };
+        let text = self.text;
+        let body = Rect::from_min_max(
+            screen.min,
+            pos2(screen.max.x, screen.max.y - footer_height(screen)),
+        );
+        painter.rect_filled(body, 0.0, theme::BACKGROUND);
+        let margin = (screen.width() * 0.045).max(24.0);
+        let title = FontId::proportional(screen.height() * 0.042);
+        let normal = FontId::proportional(screen.height() * 0.028);
+        let small = FontId::proportional(screen.height() * 0.022);
+
+        let mut job = LayoutJob::simple(
+            format!("{} · {}", text.artwork, game.title),
+            title,
+            theme::TEXT,
+            body.width() - margin * 2.0,
+        );
+        job.wrap.max_rows = 1;
+        job.wrap.overflow_character = Some('…');
+        let heading = painter.layout_job(job);
+        let heading_height = heading.size().y;
+        painter.galley(
+            pos2(body.min.x + margin, body.min.y + margin * 0.6),
+            heading,
+            theme::TEXT,
+        );
+
+        // The kinds, as tabs.
+        let tabs_y = body.min.y + margin * 0.6 + heading_height + screen.height() * 0.035;
+        let mut x = body.min.x + margin;
+        for (index, kind) in Kind::ALL.iter().enumerate() {
+            let label = match kind {
+                Kind::Portrait => text.art_portrait,
+                Kind::Wide => text.art_wide,
+                Kind::Hero => text.art_hero,
+                Kind::Logo => text.art_logo,
+            };
+            let galley = painter.layout_no_wrap(label.to_string(), normal.clone(), theme::TEXT);
+            let rect = Rect::from_min_size(pos2(x, tabs_y), galley.size() + vec2(32.0, 16.0));
+            let current = index == picker.kind;
+            if current {
+                painter.rect_filled(rect, 20.0, theme::ACCENT);
+            }
+            painter.text(
+                rect.center(),
+                Align2::CENTER_CENTER,
+                label,
+                normal.clone(),
+                if current { Color32::BLACK } else { theme::DIM },
+            );
+            x = rect.max.x + 14.0;
+        }
+
+        // The images, each in a box of its kind's shape.
+        let kind = picker.kind();
+        let aspect = match kind {
+            Kind::Portrait => 2.0 / 3.0,
+            Kind::Wide => 920.0 / 430.0,
+            Kind::Hero => 1920.0 / 620.0,
+            Kind::Logo => 16.0 / 9.0,
+        };
+        let row_top = tabs_y + screen.height() * 0.1;
+        let row_bottom = body.max.y - screen.height() * 0.08;
+        let mut height = (row_bottom - row_top).min(screen.height() * 0.52);
+        let mut box_width = height * aspect;
+        if box_width > screen.width() * 0.42 {
+            box_width = screen.width() * 0.42;
+            height = box_width / aspect;
+        }
+        let center = pos2(body.center().x, (row_top + row_bottom) / 2.0);
+        let status = |message: &str, colour: Color32| {
+            painter.text(
+                center,
+                Align2::CENTER_CENTER,
+                message,
+                normal.clone(),
+                colour,
+            );
+        };
+        let found = match picker.choices.get(&kind) {
+            None => return status(text.art_loading, theme::DIM),
+            Some(Err(error)) if error.is_empty() => return status(text.art_needs_key, theme::DIM),
+            Some(Err(error)) => return status(error, theme::FAILED),
+            Some(Ok(found)) if found.is_empty() => return status(text.art_none, theme::DIM),
+            Some(Ok(found)) => found,
+        };
+        let focused = picker.focused();
+        let step = box_width + screen.width() * 0.025;
+        let row = painter.with_clip_rect(Rect::from_min_max(
+            pos2(body.min.x, row_top - 20.0),
+            pos2(body.max.x, row_bottom + 20.0),
+        ));
+        let first = focused.saturating_sub(3);
+        for (index, choice) in found.iter().enumerate().skip(first).take(7) {
+            let slot = Rect::from_center_size(
+                center + vec2((index as f32 - focused as f32) * step, 0.0),
+                vec2(box_width, height),
+            );
+            let is_focused = index == focused;
+            row.rect_filled(slot, 12.0, theme::PANEL);
+            if let Some(Some(texture)) = picker.previews.get(&(kind, index)) {
+                // Fitted inside the box, keeping the image's own shape.
+                let [w, h] = texture.size();
+                let scale = (slot.width() / w as f32).min(slot.height() / h as f32);
+                let image = Rect::from_center_size(slot.center(), vec2(w as f32, h as f32) * scale);
+                row.image(
+                    texture.id(),
+                    image,
+                    Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                    if is_focused {
+                        Color32::WHITE
+                    } else {
+                        Color32::from_gray(110)
+                    },
+                );
+            }
+            if picker.picked.get(&kind) == Some(&choice.url) {
+                let galley =
+                    row.layout_no_wrap(text.art_current.to_string(), small.clone(), Color32::BLACK);
+                let badge = Rect::from_min_size(
+                    slot.min + vec2(10.0, 10.0),
+                    galley.size() + vec2(18.0, 10.0),
+                );
+                row.rect_filled(badge, 8.0, theme::INSTALLED);
+                row.galley(badge.min + vec2(9.0, 5.0), galley, Color32::BLACK);
+            }
+            if is_focused {
+                let busy = picker
+                    .applying
+                    .as_ref()
+                    .is_some_and(|(applying, url)| *applying == kind && *url == choice.url);
+                row.rect_stroke(
+                    slot,
+                    12.0,
+                    Stroke::new(4.0, if busy { theme::WORKING } else { theme::ACCENT }),
+                    StrokeKind::Outside,
+                );
+            }
+        }
+        painter.text(
+            pos2(center.x, row_bottom + screen.height() * 0.035),
+            Align2::CENTER_CENTER,
+            format!("{}/{}", focused + 1, found.len()),
+            small,
+            theme::DIM,
+        );
+    }
+
     /// The footer: the same bar on every screen, saying what the buttons do there.
     fn draw_footer(&self, painter: &egui::Painter, screen: Rect) {
         let text = self.text;
@@ -1518,7 +1989,23 @@ impl App {
                     ("Y", text.space),
                     ("B", text.done),
                 ],
-                Screen::Downloads => vec![("B", text.back)],
+                Screen::Downloads => {
+                    let mut hints = Vec::new();
+                    if self.download_rows().len() > 1 {
+                        hints.push(("▲▼", text.downloads));
+                    }
+                    if self.focused_failure().is_some() {
+                        hints.push(("A", text.retry));
+                    }
+                    hints.push(("B", text.back));
+                    hints
+                }
+                Screen::Art => vec![
+                    ("◀▶", text.artwork),
+                    ("LB/RB", text.art_kinds),
+                    ("A", text.art_pick),
+                    ("B", text.back),
+                ],
                 Screen::Menu { .. }
                 | Screen::ConfirmRestart { .. }
                 | Screen::ConfirmQuit { .. } => {
@@ -1571,6 +2058,17 @@ impl App {
     }
 }
 
+/// The space [`draw_button`] takes for `label`.
+fn button_size(painter: &egui::Painter, label: &str, icon: Option<Os>, font: &FontId) -> Vec2 {
+    let galley = painter.layout_no_wrap(label.to_string(), font.clone(), Color32::BLACK);
+    let icon_room = if icon.is_some() {
+        galley.size().y + 14.0
+    } else {
+        0.0
+    };
+    galley.size() + vec2(64.0 + icon_room, 32.0)
+}
+
 fn draw_button(
     painter: &egui::Painter,
     at: Pos2,
@@ -1586,7 +2084,7 @@ fn draw_button(
     } else {
         0.0
     };
-    let rect = Rect::from_min_size(at, galley.size() + vec2(64.0 + icon_room, 32.0));
+    let rect = Rect::from_min_size(at, button_size(painter, label, icon, font));
     painter.rect_filled(rect, 14.0, if focused { theme::ACCENT } else { theme::KEY });
     if focused {
         painter.rect_stroke(
