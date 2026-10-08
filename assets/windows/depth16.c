@@ -52,6 +52,7 @@ __declspec(dllimport) BOOL __stdcall CreateProcessA(const char *, char *, void *
 __declspec(dllimport) DWORD __stdcall WaitForSingleObject(HANDLE, DWORD);
 __declspec(dllimport) BOOL __stdcall GetExitCodeProcess(HANDLE, DWORD *);
 __declspec(dllimport) void __stdcall ExitProcess(unsigned int);
+__declspec(dllimport) void __stdcall Sleep(DWORD);
 
 #define ENUM_CURRENT_SETTINGS ((DWORD)-1)
 #define DM_BITSPERPEL 0x00040000
@@ -59,6 +60,18 @@ __declspec(dllimport) void __stdcall ExitProcess(unsigned int);
 #define DM_PELSHEIGHT 0x00100000
 #define CDS_UPDATEREGISTRY 0x00000001
 #define INFINITE 0xFFFFFFFF
+#define DISP_CHANGE_SUCCESSFUL 0
+/* How long to keep trying to get 16 bits: 40 tries, 250 ms apart. */
+#define ATTEMPTS 40
+#define PAUSE_MS 250
+
+/* Whether the display is now at 16 bits, as any process sees it. */
+static BOOL at_16_bits(void) {
+    DEVMODEA now;
+    for (unsigned i = 0; i < sizeof now; i++) ((char *)&now)[i] = 0;
+    now.dmSize = sizeof now;
+    return EnumDisplaySettingsA(0, ENUM_CURRENT_SETTINGS, &now) && now.dmBitsPerPel == 16;
+}
 
 /* Skip the first word of a command line, quoted or not. */
 static char *after_program(char *line) {
@@ -90,8 +103,17 @@ void start(void) {
          * "restore the desktop" with ChangeDisplaySettings(NULL, 0) when they
          * re-create their display, and a temporary change would be undone right
          * there, failing the game's next depth check. It is put back below,
-         * whatever way the game ends. */
-        ChangeDisplaySettingsA(&mode, CDS_UPDATEREGISTRY);
+         * whatever way the game ends.
+         *
+         * Checked and retried: started straight from Steam, the change can come
+         * before Wine's desktop has its display ready ("Failed to find source"),
+         * fail, and leave the game at 32 bits to refuse to start. */
+        for (unsigned attempt = 0; attempt < ATTEMPTS; attempt++) {
+            if (ChangeDisplaySettingsA(&mode, CDS_UPDATEREGISTRY) == DISP_CHANGE_SUCCESSFUL &&
+                at_16_bits())
+                break;
+            Sleep(PAUSE_MS);
+        }
     }
 
     STARTUPINFOA startup;
