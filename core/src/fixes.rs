@@ -122,11 +122,13 @@ const FIXES: &[Fix] = &[
     // winmm.dll that emulates the CD drive by playing them. Wine prefers its
     // builtin winmm, the game then fails to open the CD ("cdaudio" on "c:") and
     // crashes in its error path, so the shipped one is preferred.
-    // It renders at 640×480 and nothing makes it render wider. Through dgVoodoo the
-    // 3D is drawn at the screen's height (1440×1080 on a 1080p TV) with 4×
-    // antialiasing and 16× anisotropic filtering, 4:3 centred. Its in-game 16:9
-    // mode fails with dgVoodoo ("16 bit screen mode required", cause unknown), so
-    // it is not used. Found on the mini PC, 2026-10-06.
+    // It renders at 640×480 and nothing makes it render wider. It is not run
+    // through dgVoodoo, though that drew it sharper (1440×1080, antialiased): to go
+    // full screen dgVoodoo goes through DXGI, which sets a 32-bit mode, and the
+    // game's depth check then fails ("16 bit screen mode required"), every time
+    // once its caches are warm; dgVoodoo's DesktopBitDepth = 16, meant for exactly
+    // this, crashes inside its DirectDraw (2.87.5). Found on the mini PC,
+    // 2026-10-06 and 2026-10-08.
     Fix {
         id: "1207658895",
         exe: "game.EXE",
@@ -136,17 +138,8 @@ const FIXES: &[Fix] = &[
             key: "Params",
         },
         depth16: true,
-        dll_overrides: "winmm=n,b;ddraw=n,b;d3dimm=n,b",
-        dgvoodoo: Some(DgVoodoo {
-            settings: &[
-                ("General", "ScalingMode", "centered_ar"),
-                ("DirectX", "Resolution", "max"),
-                ("DirectX", "Antialiasing", "4x"),
-                ("DirectX", "Filtering", "16"),
-                ("DirectX", "ForceVerticalSync", "true"),
-                ("DirectX", "dgVoodooWatermark", "false"),
-            ],
-        }),
+        dll_overrides: "winmm=n,b",
+        dgvoodoo: None,
     },
 ];
 
@@ -241,7 +234,7 @@ mod tests {
         assert_eq!(fixed.exe, temp.path().join(DEPTH16_NAME));
         assert_eq!(
             fixed.arguments,
-            "WINEDLLOVERRIDES=\"winmm=n,b;ddraw=n,b;d3dimm=n,b\" %command% \"game.EXE\" -fullscreen -D3D -ZBuffer \
+            "WINEDLLOVERRIDES=\"winmm=n,b\" %command% \"game.EXE\" -fullscreen -D3D -ZBuffer \
              -DoRealLock -NoDither -FrameRateMax60"
         );
         assert_eq!(std::fs::read(&fixed.exe).unwrap(), DEPTH16);
@@ -265,7 +258,7 @@ mod tests {
             "[General]\nScalingMode = centered_ar\n\n[Glide]\nResolution = unforced\n\n[DirectX]\n; Resolution: comment\nResolution    = max\n"
         );
         assert!(configure_dgvoodoo(template, &[("DirectX", "Missing", "1")]).is_err());
-        assert!(dgvoodoo(&"1207658895".into()).is_some());
+        assert!(dgvoodoo(&"1207658895".into()).is_none());
     }
 
     #[test]
