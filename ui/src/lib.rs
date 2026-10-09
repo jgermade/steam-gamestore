@@ -14,6 +14,7 @@
 
 mod app;
 mod covers;
+mod focus;
 mod icons;
 mod input;
 mod jobs;

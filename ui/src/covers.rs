@@ -5,10 +5,11 @@
 //! game without one is remembered as `<id>.none` and drawn as a placeholder. The
 //! grid never waits on any of this: a cover appears when it is ready.
 //!
-//! These are the grid's own thumbnails. The full-size Steam artwork for an
-//! installed game is `core::artwork`'s job.
+//! An installed game shows its Steam portrait instead, the image in Steam's
+//! `grid` directory, so the store and Steam's library show the same cover;
+//! that image is `core::artwork`'s job.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 
@@ -24,13 +25,13 @@ pub const HEIGHT: u32 = 423;
 const WORKERS: usize = 4;
 
 pub struct Covers {
-    requests: Sender<ProductId>,
+    requests: Sender<(ProductId, Option<PathBuf>)>,
     results: Receiver<(ProductId, Option<ColorImage>)>,
 }
 
 impl Covers {
     pub fn new(cache_dir: &Path, wake: impl Fn() + Send + Sync + 'static) -> Self {
-        let (requests, queue) = channel::<ProductId>();
+        let (requests, queue) = channel::<(ProductId, Option<PathBuf>)>();
         let (done, results) = channel();
         let queue = Arc::new(Mutex::new(queue));
         let wake = Arc::new(wake);
@@ -44,8 +45,11 @@ impl Covers {
                 let cdn = DownloadClient::new();
                 loop {
                     let next = queue.lock().ok().and_then(|queue| queue.recv().ok());
-                    let Some(id) = next else { break };
-                    let image = load(&http, &cdn, &dir, &id);
+                    let Some((id, steam)) = next else { break };
+                    let image = steam
+                        .and_then(|file| std::fs::read(file).ok())
+                        .and_then(|bytes| decode(&bytes))
+                        .or_else(|| load(&http, &cdn, &dir, &id));
                     if done.send((id, image)).is_err() {
                         break;
                     }
@@ -57,9 +61,10 @@ impl Covers {
         Self { requests, results }
     }
 
-    /// Ask for a cover. Each id should be asked for once.
-    pub fn request(&self, id: ProductId) {
-        let _ = self.requests.send(id);
+    /// Ask for a cover: `steam`'s image when there is one, else the store's.
+    /// Asking again replaces the cover when it arrives.
+    pub fn request(&self, id: ProductId, steam: Option<PathBuf>) {
+        let _ = self.requests.send((id, steam));
     }
 
     /// Covers that are ready, at most `limit` of them, so uploading textures never

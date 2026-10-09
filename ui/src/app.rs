@@ -20,6 +20,7 @@ use gamestore_core::registry::{Registry, State};
 use gamestore_platform_linux::{install, pending};
 
 use crate::covers::{self, Covers};
+use crate::focus;
 use crate::icons;
 use crate::input::{Input, Nav};
 use crate::jobs::{Jobs, Machine, Progress};
@@ -163,9 +164,6 @@ impl App {
             move || ctx.request_repaint()
         };
         let covers = Covers::new(&machine.paths.cache_dir, wake.clone());
-        for game in &games {
-            covers.request(game.id.clone());
-        }
         let jobs = Jobs::new(machine.clone(), wake.clone());
         let media = Media::new(machine.clone(), wake);
 
@@ -210,6 +208,10 @@ impl App {
         };
         app.reload();
         app.refilter();
+        for index in 0..app.games.len() {
+            let id = app.games[index].id.clone();
+            app.request_cover(id);
+        }
         app
     }
 
@@ -239,6 +241,23 @@ impl App {
                 .collect();
         }
         self.pending = pending::list(&self.machine.paths).len();
+    }
+
+    /// The portrait Steam shows for the game's tile, when it has one.
+    fn steam_cover(&self, id: &ProductId) -> Option<std::path::PathBuf> {
+        let appid = self.known.get(id)?.appid?;
+        self.machine.users.iter().find_map(|user| {
+            ["png", "jpg", "jpeg", "webp"]
+                .iter()
+                .map(|extension| user.grid_dir().join(format!("{appid}p.{extension}")))
+                .find(|file| file.is_file())
+        })
+    }
+
+    /// Ask for a game's cover, the same one Steam shows when it has a tile.
+    fn request_cover(&self, id: ProductId) {
+        let steam = self.steam_cover(&id);
+        self.covers.request(id, steam);
     }
 
     fn installed(&self, id: &ProductId) -> bool {
@@ -852,9 +871,11 @@ impl eframe::App for App {
         }
         for (id, progress) in self.jobs.updates() {
             let finished = !progress.active();
-            self.progress.insert(id, progress);
+            self.progress.insert(id.clone(), progress);
             if finished {
+                // The install wrote the tile's artwork: show the same cover.
                 self.reload();
+                self.request_cover(id);
             }
         }
         if self.loaded_at.elapsed() > Duration::from_secs(3) {
@@ -2087,12 +2108,7 @@ fn draw_button(
     let rect = Rect::from_min_size(at, button_size(painter, label, icon, font));
     painter.rect_filled(rect, 14.0, if focused { theme::ACCENT } else { theme::KEY });
     if focused {
-        painter.rect_stroke(
-            rect,
-            14.0,
-            Stroke::new(3.0, Color32::WHITE),
-            StrokeKind::Outside,
-        );
+        focus::ring(painter, rect, 14.0);
     }
     let content = rect.min + vec2(32.0, 16.0);
     if let Some(os) = icon {
@@ -2183,12 +2199,7 @@ fn draw_menu(painter: &egui::Painter, screen: Rect, title: &str, items: [&str; 3
         let focused = index == focused;
         painter.rect_filled(rect, 14.0, if focused { theme::ACCENT } else { theme::KEY });
         if focused {
-            painter.rect_stroke(
-                rect,
-                14.0,
-                Stroke::new(3.0, Color32::WHITE),
-                StrokeKind::Outside,
-            );
+            focus::ring(painter, rect, 14.0);
         }
         painter.text(
             rect.left_center() + vec2(28.0, 0.0),
