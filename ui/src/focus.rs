@@ -1,69 +1,62 @@
-//! The border of the button in focus: a pale line in a breathing glow, with a
-//! white light running round it, so the focus is found at a glance from across the room and
-//! a still screen still shows which button A presses.
+//! The border of the button in focus: a gradient in tones close to the button's
+//! own purple that turns slowly round it, so the focus is found at a glance from
+//! across the room and stays calm to look at.
 
 use eframe::egui::{self, Color32, Pos2, Rect, Stroke, StrokeKind, pos2, vec2};
 
 use crate::theme;
 
-/// Seconds for the light to go once round.
-const LAP: f32 = 2.2;
-/// How much of the border the light covers, as a fraction.
-const TAIL: f32 = 0.28;
-/// The tail is drawn in this many pieces, each fainter than the one before.
-const PIECES: usize = 24;
+/// Seconds for the gradient to turn once round.
+const LAP: f32 = 4.0;
+
+/// The gradient's tones, round the border and back to the first: the button's
+/// purple, a pale lilac, a pink purple and a blue violet.
+const TONES: [Color32; 4] = [
+    theme::ACCENT,
+    Color32::from_rgb(232, 210, 255),
+    Color32::from_rgb(236, 150, 245),
+    Color32::from_rgb(140, 120, 255),
+];
 
 /// Draw the focus border outside `rect`, whose corners have `radius`.
 pub fn ring(painter: &egui::Painter, rect: Rect, radius: f32) {
     let time = painter.ctx().input(|input| input.time) as f32;
 
-    // A soft glow that breathes, under a steady pale line.
-    let breath = 0.5 + 0.5 * (time * std::f32::consts::TAU / 1.6).sin();
+    // A soft glow, so the border reads from far away.
     painter.rect_stroke(
         rect,
         radius,
-        Stroke::new(
-            4.0 + 6.0 * breath,
-            theme::ACCENT.gamma_multiply(0.25 + 0.2 * breath),
-        ),
-        StrokeKind::Outside,
-    );
-    painter.rect_stroke(
-        rect,
-        radius,
-        Stroke::new(3.0, theme::ACCENT.lerp_to_gamma(Color32::WHITE, 0.45)),
+        Stroke::new(8.0, theme::ACCENT.gamma_multiply(0.3)),
         StrokeKind::Outside,
     );
 
-    // The light: a white stretch of the line with a purple halo outside it,
-    // fading behind its head. Drawn in a few continuous pieces, each a little
-    // fainter, so the joins stay smooth.
-    let lines = [
-        (rect.expand(4.0), 10.0, theme::ACCENT),
-        (rect.expand(1.5), 5.0, Color32::WHITE),
-    ];
-    for (around, width, colour) in lines {
-        let path = outline(around, radius + (around.width() - rect.width()) / 2.0, 3.0);
-        let count = path.len();
-        if count < 2 {
-            return;
-        }
-        let head = ((time / LAP).fract() * count as f32) as usize;
-        let tail = ((count as f32 * TAIL) as usize).max(PIECES);
-        let piece = tail / PIECES;
-        for index in 0..PIECES {
-            let fade = 1.0 - index as f32 / PIECES as f32;
-            // One point of overlap with the next piece, so there is no gap.
-            let points: Vec<Pos2> = (index * piece..=(index + 1) * piece)
-                .map(|step| path[(head + count - step) % count])
-                .collect();
-            painter.add(egui::Shape::line(
-                points,
-                Stroke::new(width * (0.5 + 0.5 * fade), colour.gamma_multiply(fade)),
-            ));
-        }
+    // The gradient: each short piece of the border takes the tone of where it
+    // is, shifted with time, so the colours flow round.
+    let path = outline(rect.expand(2.0), radius + 2.0, 3.0);
+    let count = path.len();
+    if count < 2 {
+        return;
+    }
+    let turn = (time / LAP).fract();
+    for index in 0..count {
+        let at = (index as f32 / count as f32 + turn).fract();
+        painter.line_segment(
+            [path[index], path[(index + 1) % count]],
+            Stroke::new(4.0, tone(at)),
+        );
     }
     painter.ctx().request_repaint();
+}
+
+/// The gradient's colour at `at`, from 0 to 1 round the border.
+fn tone(at: f32) -> Color32 {
+    let scaled = at * TONES.len() as f32;
+    let from = scaled.floor() as usize % TONES.len();
+    let to = (from + 1) % TONES.len();
+    // Eased, so each tone lingers a little before the next.
+    let t = scaled.fract();
+    let eased = t * t * (3.0 - 2.0 * t);
+    TONES[from].lerp_to_gamma(TONES[to], eased)
 }
 
 /// Points every `spacing` pixels round a rounded rectangle, clockwise from the
