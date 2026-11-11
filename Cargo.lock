@@ -1213,6 +1213,7 @@ name = "gamestore-core"
 version = "0.0.1"
 dependencies = [
  "directories",
+ "image",
  "keyring",
  "md-5",
  "percent-encoding",
