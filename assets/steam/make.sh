@@ -56,3 +56,12 @@ magick -size 256x256 xc:none -fill "$BG2" -draw 'roundrectangle 8,8 247,247 48,4
     -font "$FONT" -pointsize 170 -fill "$ACCENT" -gravity center -annotate +0+6 'G' icon.png
 
 rm -f wm.png stacked.png
+
+# The badge drawn on the bottom right of the portrait and wide capsules of games
+# installed from GOG, so the library shows where a game came from: "GOG" in
+# white on GOG's purple, with a thin light edge to read over any cover.
+magick -size 264x132 xc:none \
+    -fill '#86328a' -stroke 'rgba(255,255,255,0.85)' -strokewidth 5 \
+    -draw 'roundrectangle 4,4 259,127 26,26' \
+    \( -background none -font "$FONT" -pointsize 92 -fill white label:GOG -trim +repage \) \
+    -gravity center -geometry +0+2 -composite gog-badge.png

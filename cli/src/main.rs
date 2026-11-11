@@ -95,6 +95,14 @@ enum Command {
         #[arg(long)]
         remove: bool,
     },
+    /// Put the Steam artwork of installed games in place again, as an install
+    /// does now (with the GOG badge on the covers). Steam shows it after it
+    /// restarts.
+    #[cfg(target_os = "linux")]
+    SteamArt {
+        /// Only this game, by id or title; every installed game otherwise.
+        game: Option<String>,
+    },
     /// Add gamestore to Steam as a non-Steam tile, to test it from Big Picture.
     #[cfg(target_os = "linux")]
     SteamInstall {
@@ -468,6 +476,44 @@ fn run(cli: Cli) -> Result<()> {
                     no_art,
                 },
             )?;
+        }
+        #[cfg(target_os = "linux")]
+        Command::SteamArt { game } => {
+            let mut stored = open(&config, &paths)?;
+            stored.session.restore()?;
+            let token = stored.session.access_token()?;
+            let catalog = gamestore_core::catalog::load_or_fetch(
+                &paths,
+                &UreqClient::new(),
+                &token,
+                SystemTime::now(),
+            )?;
+            let steam_root = platform.steam_root()?;
+            let users = gamestore_platform_linux::shortcuts::steam_users(&steam_root)?;
+            let context = gamestore_platform_linux::install::Context {
+                config: &config,
+                paths: &paths,
+                steam_root: &steam_root,
+                access_token: &token,
+            };
+            let only = match &game {
+                Some(query) => Some(install::find_game(&catalog, query)?.id.clone()),
+                None => None,
+            };
+            let registry = gamestore_core::registry::Registry::load(&paths)?;
+            for entry in registry.entries() {
+                if only.as_ref().is_some_and(|id| *id != entry.id) || !entry.state.is_playable() {
+                    continue;
+                }
+                let (Some(appid), Some(found)) = (entry.steam_appid, catalog.get(&entry.id)) else {
+                    continue;
+                };
+                match gamestore_platform_linux::install::refresh_art(&context, found, appid, &users)
+                {
+                    Ok(count) => println!("{}: {count} images", found.title),
+                    Err(error) => eprintln!("{}: {error}", found.title),
+                }
+            }
         }
         #[cfg(target_os = "linux")]
         Command::SteamApply => {

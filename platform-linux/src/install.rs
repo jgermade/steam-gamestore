@@ -545,6 +545,26 @@ pub fn install_log(paths: &Paths, game: &Game) -> PathBuf {
     paths.log_dir().join(format!("install-{}.log", game.id))
 }
 
+/// Put an installed game's artwork in place again, for every user in `users`:
+/// the picked images first, then SteamGridDB's, then GOG's, as an install does.
+/// For artwork made before a change to how it is made, such as the GOG badge.
+/// Returns how many images were written per user.
+pub fn refresh_art(
+    context: &Context,
+    game: &Game,
+    appid: u32,
+    users: &[SteamUser],
+) -> Result<usize> {
+    fetch_art(
+        context,
+        &UreqClient::new(),
+        &DownloadClient::new(),
+        game,
+        appid,
+        users,
+    )
+}
+
 fn fetch_art(
     context: &Context,
     http: &UreqClient,

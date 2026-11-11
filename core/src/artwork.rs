@@ -304,6 +304,37 @@ pub fn remember(paths: &Paths, id: &ProductId, art: &Art) -> Result<()> {
     crate::atomic::write(&file, text.as_bytes(), crate::atomic::Access::Default)
 }
 
+/// The badge on the capsules of games installed from GOG, made by
+/// `assets/steam/make.sh`.
+pub const GOG_BADGE: &[u8] = include_bytes!("../../assets/steam/gog-badge.png");
+
+/// `bytes` with the GOG badge on its bottom right, as PNG, for the kinds that are
+/// covers (portrait and wide); `None` for the others, or bytes that are not an
+/// image. The badge is sized to the cover, so it reads the same at any size.
+pub fn with_badge(bytes: &[u8], kind: Kind) -> Option<Vec<u8>> {
+    let share = match kind {
+        Kind::Portrait => 0.28,
+        Kind::Wide => 0.17,
+        Kind::Hero | Kind::Logo => return None,
+    };
+    let mut cover = image::load_from_memory(bytes).ok()?.to_rgba8();
+    let badge = image::load_from_memory(GOG_BADGE).ok()?;
+    let width = (cover.width() as f32 * share).round().max(1.0) as u32;
+    let height = (badge.height() * width / badge.width().max(1)).max(1);
+    let badge = badge
+        .resize_exact(width, height, image::imageops::FilterType::Lanczos3)
+        .to_rgba8();
+    let margin = (cover.width().min(cover.height()) as f32 * 0.035).round() as i64;
+    let x = cover.width() as i64 - width as i64 - margin;
+    let y = cover.height() as i64 - height as i64 - margin;
+    image::imageops::overlay(&mut cover, &badge, x, y);
+    let mut png = Vec::new();
+    cover
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .ok()?;
+    Some(png)
+}
+
 /// Download each image once and write it into every grid directory, replacing
 /// any earlier image of the same kind whatever its extension. Directories that are
 /// the same one through a symlink are written once. Returns the files written.
@@ -335,7 +366,11 @@ pub fn save<F: Fetch>(
         std::io::Read::read_to_end(&mut body, &mut bytes)
             .map_err(|error| Error::io("downloading artwork", error))?;
 
-        let name = art.file_name(appid);
+        // Capsules get the GOG badge, and are then always PNG.
+        let (name, bytes) = match with_badge(&bytes, art.kind) {
+            Some(badged) => (format!("{appid}{}.png", art.kind.suffix()), badged),
+            None => (art.file_name(appid), bytes),
+        };
         for dir in &dirs {
             remove_kind(dir, appid, art.kind);
             let path = dir.join(&name);
@@ -487,6 +522,28 @@ mod tests {
         assert_eq!(picked.len(), 2);
         assert_eq!(picked[0].url, "https://a/2.png");
         assert_eq!(picked[1], hero);
+    }
+
+    #[test]
+    fn covers_get_the_badge_on_their_bottom_right_and_the_rest_do_not() {
+        let mut cover = image::RgbaImage::from_pixel(600, 900, image::Rgba([0, 0, 0, 255]));
+        cover.put_pixel(0, 0, image::Rgba([1, 2, 3, 255]));
+        let mut png = Vec::new();
+        cover
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+
+        let badged = image::load_from_memory(&with_badge(&png, Kind::Portrait).unwrap())
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(badged.dimensions(), (600, 900));
+        // The badge's purple in the bottom right; the top left untouched.
+        let inside = badged.get_pixel(600 - 21 - 168 / 2, 900 - 21 - 84 / 2);
+        assert!(inside[0] > 100 && inside[2] > 100, "{inside:?}");
+        assert_eq!(badged.get_pixel(0, 0), &image::Rgba([1, 2, 3, 255]));
+
+        assert!(with_badge(&png, Kind::Hero).is_none());
+        assert!(with_badge(b"not an image", Kind::Portrait).is_none());
     }
 
     struct Images;

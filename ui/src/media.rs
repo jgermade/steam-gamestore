@@ -203,12 +203,20 @@ fn put_in_place(
     apply: &Apply,
 ) -> gamestore_core::Result<Option<ColorImage>> {
     artwork::remember(&machine.paths, &apply.id, &apply.art)?;
+    let mut in_steam = None;
     if let Some(appid) = apply.appid {
         let dirs: Vec<PathBuf> = machine.users.iter().map(|user| user.grid_dir()).collect();
-        artwork::save(cdn, std::slice::from_ref(&apply.art), appid, &dirs)?;
+        let written = artwork::save(cdn, std::slice::from_ref(&apply.art), appid, &dirs)?;
+        in_steam = written.into_iter().next();
     }
     if apply.art.kind != Kind::Portrait {
         return Ok(None);
+    }
+    // A game with a tile shows Steam's portrait, badge and all.
+    if let Some(file) = in_steam {
+        return Ok(std::fs::read(file)
+            .ok()
+            .and_then(|bytes| covers::decode(&bytes)));
     }
     let bytes = cache_file(&machine.paths.cache_dir, "artwork", &apply.art.url)
         .and_then(|file| cached_bytes(cdn, &file, &apply.art.url));
