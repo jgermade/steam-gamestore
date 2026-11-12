@@ -48,6 +48,50 @@ pub fn launcher_path(paths: &Paths) -> PathBuf {
     paths.data_dir.join("steam").join("gamestore-tile.sh")
 }
 
+/// The tile's own Steam artwork, made by `assets/steam/make.sh`, as Steam names
+/// the files after the appid: portrait, wide, hero, logo.
+pub const ARTWORK: [(&str, &[u8]); 4] = [
+    ("p", include_bytes!("../../assets/steam/p.png")),
+    ("", include_bytes!("../../assets/steam/wide.png")),
+    ("_hero", include_bytes!("../../assets/steam/hero.png")),
+    ("_logo", include_bytes!("../../assets/steam/logo.png")),
+];
+
+/// The tile's icon.
+pub const ICON: &[u8] = include_bytes!("../../assets/steam/icon.png");
+
+/// Where the icon is written for the tile to point at.
+pub fn icon_path(paths: &Paths) -> PathBuf {
+    paths.data_dir.join("steam").join("gamestore-icon.png")
+}
+
+/// Write the icon where [`icon_path`] says.
+pub fn write_icon(paths: &Paths) -> Result<PathBuf> {
+    let path = icon_path(paths);
+    if let Some(parent) = path.parent() {
+        atomic::create_dir(parent, Access::Default)?;
+    }
+    atomic::write(&path, ICON, Access::Default)?;
+    Ok(path)
+}
+
+/// Write the tile's artwork into a Steam account's grid directory. Steam reads
+/// these whether it is running or not.
+pub fn write_artwork(grid_dir: &Path, appid: u32) -> Result<()> {
+    atomic::create_dir(grid_dir, Access::Default)?;
+    for (suffix, bytes) in ARTWORK {
+        for extension in ["png", "jpg", "jpeg", "webp"] {
+            let _ = std::fs::remove_file(grid_dir.join(format!("{appid}{suffix}.{extension}")));
+        }
+        atomic::write(
+            &grid_dir.join(format!("{appid}{suffix}.png")),
+            bytes,
+            Access::Default,
+        )?;
+    }
+    Ok(())
+}
+
 /// Quote a path for `sh`, so a space or a quote in it cannot end the word.
 fn quote(path: &Path) -> String {
     format!("'{}'", path.to_string_lossy().replace('\'', r"'\''"))
@@ -177,9 +221,125 @@ pub fn steam_is_running_in(proc_dir: &Path) -> bool {
     })
 }
 
+/// The appid of a game Steam is running right now, if any.
+///
+/// Steam starts every game, shortcuts included, under its `reaper` process with
+/// `SteamLaunch AppId=<appid>` on the command line. Stopping Steam then would stop
+/// the game with it, so callers check this first.
+pub fn steam_game_running() -> Option<u32> {
+    steam_game_running_in(Path::new("/proc"))
+}
+
+/// The same check against an arbitrary `/proc`, so it can be tested.
+pub fn steam_game_running_in(proc_dir: &Path) -> Option<u32> {
+    std::fs::read_dir(proc_dir)
+        .ok()?
+        .flatten()
+        .find_map(|entry| {
+            let comm = std::fs::read_to_string(entry.path().join("comm")).ok()?;
+            if comm.trim() != "reaper" {
+                return None;
+            }
+            let cmdline = std::fs::read(entry.path().join("cmdline")).ok()?;
+            let args: Vec<String> = cmdline
+                .split(|byte| *byte == 0)
+                .map(|arg| String::from_utf8_lossy(arg).into_owned())
+                .collect();
+            if !args.iter().any(|arg| arg == "SteamLaunch") {
+                return None;
+            }
+            args.iter()
+                .find_map(|arg| arg.strip_prefix("AppId="))
+                .and_then(|appid| appid.parse().ok())
+                .or(Some(0))
+        })
+}
+
+/// Whether the Steam client that owns `steam_root` is running.
+///
+/// A client is matched to a root through `/proc/<pid>/exe`, which points at
+/// `<root>/ubuntu12_32/steam`. A Steam running from another root does not own this
+/// root's files, so it does not count. When the link cannot be read the process is
+/// assumed to be this root's: wrongly saying Steam is running costs a retry,
+/// wrongly saying it is not costs a tile.
+pub fn steam_is_running_from(steam_root: &Path) -> bool {
+    steam_is_running_from_in(Path::new("/proc"), steam_root)
+}
+
+/// The same check against an arbitrary `/proc`, so it can be tested.
+pub fn steam_is_running_from_in(proc_dir: &Path, steam_root: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(proc_dir) else {
+        return false;
+    };
+    let root = steam_root
+        .canonicalize()
+        .unwrap_or_else(|_| steam_root.to_path_buf());
+
+    entries.flatten().any(|entry| {
+        let numeric = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.parse::<u32>().is_ok());
+        let is_steam = std::fs::read_to_string(entry.path().join("comm"))
+            .is_ok_and(|comm| comm.trim() == "steam");
+        if !numeric || !is_steam {
+            return false;
+        }
+        match std::fs::read_link(entry.path().join("exe")) {
+            Ok(exe) => exe.parent().and_then(Path::parent).is_none_or(|owner| {
+                owner.canonicalize().unwrap_or_else(|_| owner.to_path_buf()) == root
+            }),
+            Err(_) => true,
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_game_under_steams_reaper_is_found_with_its_appid() {
+        let temp = tempfile::tempdir().unwrap();
+        let process = temp.path().join("77");
+        std::fs::create_dir_all(&process).unwrap();
+        std::fs::write(process.join("comm"), "reaper\n").unwrap();
+        std::fs::write(
+            process.join("cmdline"),
+            b"/steam/ubuntu12_32/reaper\0SteamLaunch\0AppId=2907567421\0--\0proton\0",
+        )
+        .unwrap();
+
+        assert_eq!(steam_game_running_in(temp.path()), Some(2907567421));
+
+        std::fs::write(
+            process.join("cmdline"),
+            b"/steam/ubuntu12_32/reaper\0other\0",
+        )
+        .unwrap();
+        assert_eq!(steam_game_running_in(temp.path()), None);
+    }
+
+    #[test]
+    fn steam_counts_only_for_the_root_it_runs_from() {
+        let temp = tempfile::tempdir().unwrap();
+        let proc_dir = temp.path().join("proc");
+        let ours = temp.path().join("ours");
+        let theirs = temp.path().join("theirs");
+        std::fs::create_dir_all(ours.join("ubuntu12_32")).unwrap();
+        std::fs::create_dir_all(theirs.join("ubuntu12_32")).unwrap();
+        let process = proc_dir.join("42");
+        std::fs::create_dir_all(&process).unwrap();
+        std::fs::write(process.join("comm"), "steam\n").unwrap();
+        std::os::unix::fs::symlink(theirs.join("ubuntu12_32/steam"), process.join("exe")).unwrap();
+
+        assert!(!steam_is_running_from_in(&proc_dir, &ours));
+        assert!(steam_is_running_from_in(&proc_dir, &theirs));
+
+        // Without a readable link it is assumed to be ours.
+        std::fs::remove_file(process.join("exe")).unwrap();
+        assert!(steam_is_running_from_in(&proc_dir, &ours));
+    }
 
     fn paths_in(dir: &Path) -> Paths {
         Paths {

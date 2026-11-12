@@ -21,6 +21,15 @@ first and asks — to update when a newer release is out, to reinstall when ther
 not. Options, the update rules, and what the installer does and does not touch:
 [`docs/install.md`](docs/install.md).
 
+## Installing games
+
+```sh
+gamestore install "Xeno Crisis" --restart-steam
+```
+
+Downloads GOG's offline installer, installs it silently through Steam's Proton,
+and adds the game to Steam with its artwork: [`docs/installing-games.md`](docs/installing-games.md).
+
 ## First run
 
 ```sh
@@ -62,6 +71,7 @@ controller UI are not started.
 | [`docs/install.md`](docs/install.md) | Installing, updating, and what the installer touches |
 | [`docs/gog-login.md`](docs/gog-login.md) | The GOG login flow, credentials, where the session is kept |
 | [`docs/steam-tile.md`](docs/steam-tile.md) | Running gamestore from a Steam tile |
+| [`docs/installing-games.md`](docs/installing-games.md) | `gamestore install`: from the GOG library to a Steam tile |
 | [`docs/development.md`](docs/development.md) | Build, checks, workspace layout, environment, releases |
 | [`docs/gog-installer.md`](docs/gog-installer.md) | Design notes: the whole thing, end to end |
 | [`ROADMAP/2026-09-17/00-overview.md`](ROADMAP/2026-09-17/00-overview.md) | The plan, with a Gantt chart |

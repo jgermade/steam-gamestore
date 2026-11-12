@@ -9,6 +9,28 @@ publishes no device-code flow and the redirect is fixed on their side, which is
 why the paste step exists — see
 [`RECORD/2026-09-16.gog-login-flow-decision.completed.md`](../RECORD/2026-09-16.gog-login-flow-decision.completed.md).
 
+### Finishing the login on a phone
+
+`gamestore login` also shows two QR codes. The second is the GOG login itself: scan
+it, log in on the phone, and type the `code` from the address it ends on into the
+terminal. The first opens a small page served by
+gamestore on the LAN; from there the phone logs in to GOG and pastes back the
+address it lands on, and the exchange still happens on the machine. The page lives
+on a random path, listens on the LAN address only, and expires after ten minutes;
+the terminal prompt keeps working alongside it.
+
+It listens on TCP port 8731, which a firewall has to allow from the LAN — with ufw:
+`sudo ufw allow from 192.168.0.0/16 to any port 8731 proto tcp`. Change the port,
+or turn the QR off, in `config.toml`:
+
+```toml
+[login]
+qr = true
+qr_port = 8731
+```
+
+`gamestore login --no-qr` skips it for one run.
+
 ## Client credentials
 
 The OAuth2 client credentials are supplied by you, either in `config.toml`:

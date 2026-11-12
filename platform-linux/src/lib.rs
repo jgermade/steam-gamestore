@@ -1,8 +1,14 @@
 //! Linux side of gamestore: the Steam installation, the `shortcuts.vdf` writer,
 //! and later the `CompatToolMapping` writer and the generated launch wrappers.
 
+pub mod inno;
+pub mod install;
+pub mod native;
+pub mod pending;
+pub mod proton;
 pub mod shortcuts;
 pub mod tile;
+pub mod tools;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
