@@ -637,20 +637,22 @@ pub fn resolve_case(base: &Path, windows: &str) -> PathBuf {
         .split(['\\', '/'])
         .filter(|part| !part.is_empty() && *part != ".")
     {
-        let exact = path.join(part);
-        if exact.exists() {
-            path = exact;
-            continue;
-        }
-        let found = std::fs::read_dir(&path).ok().and_then(|entries| {
-            entries
-                .flatten()
-                .map(|entry| entry.file_name())
-                .find(|name| name.to_string_lossy().eq_ignore_ascii_case(part))
-        });
+        // The listing, not `exists`: on a case-insensitive filesystem (Windows,
+        // macOS) `exists` is true for any spelling, and would keep GOG's.
+        let names: Vec<_> = std::fs::read_dir(&path)
+            .map(|entries| entries.flatten().map(|entry| entry.file_name()).collect())
+            .unwrap_or_default();
+        let found = names
+            .iter()
+            .find(|name| name.as_os_str() == part)
+            .or_else(|| {
+                names
+                    .iter()
+                    .find(|name| name.to_string_lossy().eq_ignore_ascii_case(part))
+            });
         path = match found {
             Some(name) => path.join(name),
-            None => exact,
+            None => path.join(part),
         };
     }
     path
