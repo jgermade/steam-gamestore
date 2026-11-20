@@ -3,7 +3,7 @@ members = ["core", "platform-linux", "platform-windows", "cli", "ui"]
 resolver = "3"
 
 [workspace.package]
-version = "0.0.1"
+version = "0.0.2"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
