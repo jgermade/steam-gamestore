@@ -221,6 +221,9 @@ impl Storage {
 }
 
 /// Size and free space of the filesystem holding `path`, from `df`.
+///
+/// Linux only: it relies on GNU `df`'s `-B1 --output` flags.
+#[cfg(target_os = "linux")]
 pub fn filesystem(path: &Path) -> Option<(u64, u64)> {
     let output = std::process::Command::new("df")
         .args(["-B1", "--output=size,avail"])
@@ -235,6 +238,9 @@ pub fn filesystem(path: &Path) -> Option<(u64, u64)> {
 /// Measure the disk `install_root` is on. Only what is on that same disk
 /// counts: a Steam library elsewhere is not part of this picture. Walking big
 /// libraries takes seconds, so this belongs off the UI thread.
+///
+/// Linux only, like [`filesystem`]: telling disks apart uses the Unix device id.
+#[cfg(target_os = "linux")]
 pub fn storage(
     install_root: &Path,
     cache_dir: &Path,
@@ -331,6 +337,7 @@ mod tests {
         assert_eq!(human_size(2048), "2 KB");
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn storage_splits_the_disk_and_leaves_the_rest_to_the_system() {
         let temp = tempfile::tempdir().unwrap();

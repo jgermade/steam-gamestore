@@ -554,6 +554,8 @@ mod tests {
         }
     }
 
+    // The shared dir is a symlink, which only Unix creates without privileges.
+    #[cfg(unix)]
     #[test]
     fn saving_replaces_other_formats_and_writes_a_shared_dir_once() {
         let temp = tempfile::tempdir().unwrap();

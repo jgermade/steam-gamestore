@@ -73,6 +73,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+      # gilrs (controller input in `ui`) links libudev through libudev-sys.
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
       - run: cargo clippy --workspace --all-targets --target ${{ matrix.target }} -- -D warnings
       - run: cargo test --workspace --target ${{ matrix.target }}
       - run: cargo build --workspace --target ${{ matrix.target }}
@@ -106,6 +109,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: package-${{ matrix.target }}
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
       - run: cargo build --release --locked -p gamestore-cli --target ${{ matrix.target }}
       - uses: actions/upload-artifact@v4
         with:
