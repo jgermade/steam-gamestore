@@ -99,6 +99,9 @@ pub struct Entry {
     /// Set while a process is working on it.
     #[serde(default)]
     pub claim: Option<Claim>,
+    /// Which build is installed: the native one, or Windows under Proton.
+    #[serde(default)]
+    pub platform: Option<crate::catalog::Os>,
 }
 
 impl Entry {
@@ -114,6 +117,7 @@ impl Entry {
             last_played: None,
             failure: None,
             claim: None,
+            platform: None,
         }
     }
 }

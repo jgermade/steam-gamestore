@@ -39,6 +39,14 @@ pub trait HttpClient {
     }
 }
 
+/// Binary downloads, which [`HttpClient`] cannot carry: its bodies are text.
+pub trait Fetch {
+    /// GET `url` from byte `from` on. Returns the status before any of the body is
+    /// read, so the caller can tell a honoured range (206) from a server that sent
+    /// the whole file anyway (200) before it decides where the bytes go.
+    fn open(&self, url: &str, from: u64) -> Result<(u16, Box<dyn std::io::Read>)>;
+}
+
 /// Blocking HTTP client. Concurrency is a bounded worker pool over this, which is
 /// what the downloader needs; nothing here requires an async runtime.
 pub struct UreqClient {
@@ -91,6 +99,47 @@ impl HttpClient for UreqClient {
             })?;
 
         Ok(Response { status, body })
+    }
+}
+
+/// Client for large downloads. There is no whole-request deadline, which a
+/// multi-gigabyte file would always hit; connecting and the response headers still
+/// have one, so a dead CDN fails rather than hangs.
+pub struct DownloadClient {
+    agent: ureq::Agent,
+}
+
+impl DownloadClient {
+    pub fn new() -> Self {
+        let config = ureq::Agent::config_builder()
+            .timeout_connect(Some(Duration::from_secs(30)))
+            .timeout_recv_response(Some(Duration::from_secs(60)))
+            .http_status_as_error(false)
+            .build();
+        Self {
+            agent: config.into(),
+        }
+    }
+}
+
+impl Default for DownloadClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Fetch for DownloadClient {
+    fn open(&self, url: &str, from: u64) -> Result<(u16, Box<dyn std::io::Read>)> {
+        let mut request = self.agent.get(url);
+        if from > 0 {
+            request = request.header("Range", &format!("bytes={from}-"));
+        }
+        let response = request.call().map_err(|error| Error::Http {
+            url: redact(url),
+            reason: error.to_string(),
+        })?;
+        let status = response.status().as_u16();
+        Ok((status, Box::new(response.into_body().into_reader())))
     }
 }
 

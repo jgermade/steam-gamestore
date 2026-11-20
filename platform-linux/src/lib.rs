@@ -1,8 +1,19 @@
 //! Linux side of gamestore: the Steam installation, the `shortcuts.vdf` writer,
 //! and later the `CompatToolMapping` writer and the generated launch wrappers.
+//!
+//! Linux only: it runs installers, sets file modes and spawns process groups
+//! with Unix APIs. On other targets the crate is empty, so `cargo build
+//! --workspace` still works there; `cli` depends on it only on Linux.
+#![cfg(target_os = "linux")]
 
+pub mod inno;
+pub mod install;
+pub mod native;
+pub mod pending;
+pub mod proton;
 pub mod shortcuts;
 pub mod tile;
+pub mod tools;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};

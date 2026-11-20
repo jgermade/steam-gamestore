@@ -1,0 +1,16 @@
+[package]
+name = "gamestore-ui"
+description = "The controller-driven UI: a cover grid, search with an on-screen keyboard, install."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+eframe.workspace = true
+gamestore-core.workspace = true
+gamestore-platform-linux.workspace = true
+gilrs.workspace = true
+image.workspace = true
+serde_json.workspace = true
