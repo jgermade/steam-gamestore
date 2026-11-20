@@ -11,6 +11,10 @@
 //!
 //! Recorded in `RECORD/2026-09-16.controller-ui-requirement.completed.md` and
 //! `RECORD/2026-10-06.controller-ui.WIP.md`.
+//!
+//! Linux only, like `gamestore-platform-linux` it is built on. On other targets
+//! the crate is empty.
+#![cfg(target_os = "linux")]
 
 mod app;
 mod covers;

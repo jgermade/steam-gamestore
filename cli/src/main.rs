@@ -540,6 +540,7 @@ fn run(cli: Cli) -> Result<()> {
                 println!("Games installed while Steam runs are now added the next time it starts.");
             }
         }
+        #[cfg(target_os = "linux")]
         Command::SteamInstall {
             name,
             command,

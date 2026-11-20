@@ -546,8 +546,10 @@ mod tests {
         assert!(with_badge(b"not an image", Kind::Portrait).is_none());
     }
 
+    #[cfg(unix)]
     struct Images;
 
+    #[cfg(unix)]
     impl Fetch for Images {
         fn open(&self, url: &str, _: u64) -> Result<(u16, Box<dyn std::io::Read>)> {
             Ok((200, Box::new(std::io::Cursor::new(url.as_bytes().to_vec()))))
